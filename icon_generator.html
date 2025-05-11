@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Generate Extension Icons</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    
+    canvas {
+      border: 1px solid #ccc;
+      margin: 10px 0;
+    }
+    
+    .download-links {
+      margin-top: 20px;
+    }
+    
+    .download-link {
+      display: block;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Extension Icon Generator</h1>
+  <p>This page generates simple placeholder icons for your Chrome extension.</p>
+  
+  <div>
+    <canvas id="icon16" width="16" height="16"></canvas>
+    <canvas id="icon48" width="48" height="48"></canvas>
+    <canvas id="icon128" width="128" height="128"></canvas>
+  </div>
+  
+  <div class="download-links">
+    <a id="download16" class="download-link">Download 16x16 Icon</a>
+    <a id="download48" class="download-link">Download 48x48 Icon</a>
+    <a id="download128" class="download-link">Download 128x128 Icon</a>
+  </div>
+  
+  <script>
+    // Function to draw a simple icon
+    function drawIcon(canvas, size) {
+      const ctx = canvas.getContext('2d');
+      
+      // Background
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, 0, size, size);
+      
+      // Border
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = Math.max(1, size / 32);
+      ctx.strokeRect(ctx.lineWidth/2, ctx.lineWidth/2, size - ctx.lineWidth, size - ctx.lineWidth);
+      
+      // Main circle
+      ctx.fillStyle = '#00e676';
+      ctx.beginPath();
+      ctx.arc(size / 2, size / 2, size / 3, 0, 2 * Math.PI);
+      ctx.fill();
+      
+      // Letter T for TrenchBot
+      ctx.fillStyle = '#fff';
+      ctx.font = `bold ${Math.floor(size / 3)}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('T', size / 2, size / 2);
+    }
+    
+    // Function to set up a download link
+    function setupDownload(canvasId, downloadId, filename) {
+      const canvas = document.getElementById(canvasId);
+      const downloadLink = document.getElementById(downloadId);
+      
+      // Draw the icon
+      drawIcon(canvas, canvas.width);
+      
+      // Set up the download link
+      downloadLink.href = canvas.toDataURL('image/png');
+      downloadLink.download = filename;
+    }
+    
+    // Set up all icons and download links
+    window.onload = function() {
+      setupDownload('icon16', 'download16', 'icon16.png');
+      setupDownload('icon48', 'download48', 'icon48.png');
+      setupDownload('icon128', 'download128', 'icon128.png');
+    };
+  </script>
+</body>
+</html>
