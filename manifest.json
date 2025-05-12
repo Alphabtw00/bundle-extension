@@ -1,35 +1,35 @@
 {
-    "manifest_version": 3,
-    "name": "Axiom TrenchBot Bundle Info",
-    "version": "1.0",
-    "description": "Displays TrenchBot bundle percentages on Axiom Trading Platform",
-    "permissions": ["scripting", "storage", "tabs"],
-    "host_permissions": [
-      "https://axiom.trade/*",
-      "https://api.dexscreener.com/*",
-      "https://trench.bot/*"
-    ],
-    "background": {
-      "service_worker": "background.js"
-    },
-    "content_scripts": [
-      {
-        "matches": ["https://axiom.trade/*"],
-        "js": ["content.js"],
-        "run_at": "document_end"
-      }
-    ],
-    "action": {
-      "default_popup": "popup.html",
-      "default_icon": {
-        "16": "images/icon16.png",
-        "48": "images/icon48.png",
-        "128": "images/icon128.png"
-      }
-    },
-    "icons": {
+  "manifest_version": 3,
+  "name": "Axiom TrenchBot Bundle Info",
+  "version": "1.1",
+  "description": "Displays TrenchBot bundle information and visualizations on Axiom Trading Platform",
+  "permissions": ["scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://axiom.trade/*",
+    "https://api.dexscreener.com/*",
+    "https://trench.bot/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://axiom.trade/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
       "16": "images/icon16.png",
       "48": "images/icon48.png",
       "128": "images/icon128.png"
     }
+  },
+  "icons": {
+    "16": "images/icon16.png",
+    "48": "images/icon48.png",
+    "128": "images/icon128.png"
   }
+}

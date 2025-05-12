@@ -1,32 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Axiom TrenchBot Bundle Info</title>
-  <link rel="stylesheet" href="styles.css">
+  <title>TrenchBot Bundle Info</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="extension-header">
-    <img src="images/icon48.png" alt="Extension icon">
-    <h1>Axiom TrenchBot Bundle Info</h1>
+    <img src="images/icon48.png" alt="Extension icon" class="logo">
+    <h1>TrenchBot Bundle Info</h1>
   </div>
   
   <div class="status-container">
-    <div id="status-indicator" class="status-indicator active"></div>
-    <span id="status-text">Extension is active on this page</span>
+    <div id="status-indicator" class="status-indicator inactive"></div>
+    <span id="status-text">Checking status...</span>
   </div>
   
-  <button id="refresh-button" class="action-button">Refresh Current Page</button>
+  <div class="control-section">
+    <div class="toggle-container">
+      <span class="toggle-label">Enable Extension</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="extension-toggle" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    
+    <button id="refresh-button" class="action-button">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+      </svg>
+      <span>Refresh Data</span>
+    </button>
+  </div>
   
   <div class="info-container">
-    This extension shows additional bundle information 
-    from the TrenchBot API when viewing tokens on
-    Axiom Trading Platform.
-    <br><br>
-    Navigate to any token page on Axiom to view
-    bundle statistics automatically.
+    <h3>About This Extension</h3>
+    <p>
+      This extension shows bundle information from TrenchBot when viewing tokens on Axiom Trading Platform.
+    </p>
+    <p>
+      Key features:
+    </p>
+    <ul>
+      <li>View bundle percentage and holding data</li>
+      <li>See wallet distribution with interactive bubble visualization</li>
+      <li>Filter by wallet type (sniper, regular, etc.)</li>
+      <li>Explore detailed wallet information</li>
+    </ul>
+    <p>
+      <b>Note:</b> Navigate to any token page on Axiom to view bundle statistics automatically.
+    </p>
   </div>
   
-  <div class="extension-version">v1.0 - TrenchBot Bundle Info</div>
+  <div class="extension-version">v1.1 - TrenchBot Bundle Info</div>
   
   <script src="popup.js"></script>
 </body>
