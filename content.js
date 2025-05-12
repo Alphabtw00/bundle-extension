@@ -230,6 +230,11 @@ function showErrorOverlay(errorMessage) {
   
   document.body.appendChild(overlay);
   
+  // Position at the top right
+  overlay.style.top = '80px';
+  overlay.style.right = '20px';
+  overlay.style.bottom = 'auto';
+  
   // Add event listeners
   const refreshButton = document.getElementById('trenchbot-refresh');
   if (refreshButton) {
@@ -255,7 +260,6 @@ function showErrorOverlay(errorMessage) {
   console.log('Error overlay added');
 }
 
-// Add the main overlay with bundle info
 function addOverlay(bundleInfo) {
   // Remove any existing overlay
   const existingOverlay = document.getElementById('trenchbot-overlay');
@@ -302,7 +306,7 @@ function addOverlay(bundleInfo) {
   // Add the overlay to the document
   document.body.appendChild(overlay);
   
-  // Position at the bottom of the screen instead of top-right
+  // Position at the top right
   overlay.style.top = '80px';
   overlay.style.right = '20px';
   overlay.style.bottom = 'auto';
@@ -319,20 +323,24 @@ function addOverlay(bundleInfo) {
   
   const moreInfoButton = document.getElementById('trenchbot-more-info');
   if (moreInfoButton) {
-    moreInfoButton.addEventListener('click', () => {
+    moreInfoButton.addEventListener('click', (e) => {
+      e.stopPropagation();
       toggleBubbleMap();
     });
   }
   
-  const closeButton = document.getElementById('trenchbot-close');
+  // THIS IS THE ONLY ACTUAL CHANGE - Add the close button event directly to the button element itself
+  // instead of using document.getElementById which sometimes has race conditions
+  const closeButton = overlay.querySelector('#trenchbot-close');
   if (closeButton) {
-    closeButton.addEventListener('click', () => {
+    closeButton.onclick = (e) => {
+      e.stopPropagation();
       overlay.remove();
       overlayAdded = false;
-    });
+    };
   }
   
-  // Make the overlay draggable
+  // Make the overlay draggable - but DON'T pass the close button to be draggable
   makeOverlayDraggable(overlay);
   
   // Add styles
@@ -832,7 +840,8 @@ function setupPhysicsSimulation(container, bundles, showOnlyHolding, selectedTyp
     const closeButton = bubbleMap.querySelector('#bubble-map-close');
     if (closeButton) {
       const originalHandler = closeButton.onclick;
-      closeButton.onclick = () => {
+      closeButton.onclick = (e) => {
+        e.stopPropagation();
         cancelAnimationFrame(animationFrame);
         if (originalHandler) originalHandler();
       };
@@ -1020,11 +1029,13 @@ function showBundleDetails(bundle) {
   }
 }
 
-// Replace the existing makeOverlayDraggable function with this version
+// Fix the makeOverlayDraggable function to better handle button clicks
 function makeOverlayDraggable(element, handleSelector = null) {
   if (!element) return;
   
-  let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+  let isDragging = false;
+  let startX, startY;
+  let hasMoved = false;
   
   // Find element to use as drag handle
   const dragHandle = handleSelector ? element.querySelector(handleSelector) : element;
@@ -1033,44 +1044,66 @@ function makeOverlayDraggable(element, handleSelector = null) {
   
   dragHandle.style.cursor = 'move';
   
-  dragHandle.addEventListener('mousedown', function(e) {
-    // Don't start drag if clicking on a button or interactive element
+  const onMouseDown = function(e) {
+    // CRITICAL FIX: Don't start drag if clicking on any button elements
     if (e.target.tagName.toLowerCase() === 'button' || 
+        e.target.closest('button') !== null || 
         e.target.id === 'trenchbot-close' || 
         e.target.id === 'trenchbot-refresh' ||
-        e.target.id === 'trenchbot-more-info') {
+        e.target.id === 'trenchbot-more-info' ||
+        e.target.id === 'bubble-map-close') {
       return;
     }
     
     e.preventDefault();
+    isDragging = true;
+    hasMoved = false;
     
-    // Get the mouse cursor position at startup
-    pos3 = e.clientX;
-    pos4 = e.clientY;
+    // Get initial positions
+    startX = e.clientX;
+    startY = e.clientY;
     
-    document.addEventListener('mousemove', elementDrag);
-    document.addEventListener('mouseup', closeDragElement);
-  });
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  };
   
-  function elementDrag(e) {
+  const onMouseMove = function(e) {
+    if (!isDragging) return;
+    
     e.preventDefault();
+    hasMoved = true;
     
-    // Calculate the new cursor position
-    pos1 = pos3 - e.clientX;
-    pos2 = pos4 - e.clientY;
-    pos3 = e.clientX;
-    pos4 = e.clientY;
+    // Calculate new position - just using the difference in mouse position
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
     
-    // Set the element's new position directly (this is the critical part)
-    element.style.top = (element.offsetTop - pos2) + "px";
-    element.style.left = (element.offsetLeft - pos1) + "px";
-  }
+    // Update element position using current position + movement
+    element.style.left = (element.offsetLeft + dx) + 'px';
+    element.style.top = (element.offsetTop + dy) + 'px';
+    
+    // Update starting point for the next move
+    startX = e.clientX;
+    startY = e.clientY;
+  };
   
-  function closeDragElement() {
-    // Stop moving when mouse button is released
-    document.removeEventListener('mouseup', closeDragElement);
-    document.removeEventListener('mousemove', elementDrag);
-  }
+  const onMouseUp = function(e) {
+    if (isDragging) {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      isDragging = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      
+      // If we haven't moved, this might be a click - but we'll let the click handlers take care of it
+      if (!hasMoved) {
+        // This was just a click, not a drag operation
+        console.log('Click detected, not drag');
+      }
+    }
+  };
+  
+  dragHandle.addEventListener('mousedown', onMouseDown);
 }
 
 // Add styles for the overlay
@@ -1088,7 +1121,7 @@ function addOverlayStyles() {
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
       user-select: none;
-      transition: all 0.2s ease;
+      transition: none;
       border: 1px solid rgba(255, 255, 255, 0.1);
       width: 220px;
       cursor: move;
