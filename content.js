@@ -243,7 +243,8 @@ function showErrorOverlay(errorMessage) {
   const closeButton = document.getElementById('trenchbot-close');
   if (closeButton) {
     closeButton.addEventListener('click', () => {
-      overlay.style.display = 'none';
+      overlay.remove();
+      overlayAdded = false;
     });
   }
   
@@ -302,9 +303,9 @@ function addOverlay(bundleInfo) {
   document.body.appendChild(overlay);
   
   // Position at the bottom of the screen instead of top-right
-  overlay.style.top = 'auto';
-  overlay.style.bottom = '20px';
+  overlay.style.top = '80px';
   overlay.style.right = '20px';
+  overlay.style.bottom = 'auto';
   
   // Add event listeners
   const refreshButton = document.getElementById('trenchbot-refresh');
@@ -1019,7 +1020,7 @@ function showBundleDetails(bundle) {
   }
 }
 
-// Make the overlay draggable
+// Replace the existing makeOverlayDraggable function with this version
 function makeOverlayDraggable(element, handleSelector = null) {
   if (!element) return;
   
@@ -1031,59 +1032,38 @@ function makeOverlayDraggable(element, handleSelector = null) {
   if (!dragHandle) return;
   
   dragHandle.style.cursor = 'move';
-  dragHandle.addEventListener('mousedown', dragMouseDown);
   
-  function dragMouseDown(e) {
-    // Don't start drag if it's a button or form element
+  dragHandle.addEventListener('mousedown', function(e) {
+    // Don't start drag if clicking on a button or interactive element
     if (e.target.tagName.toLowerCase() === 'button' || 
-        e.target.tagName.toLowerCase() === 'input' || 
-        e.target.tagName.toLowerCase() === 'select') {
+        e.target.id === 'trenchbot-close' || 
+        e.target.id === 'trenchbot-refresh' ||
+        e.target.id === 'trenchbot-more-info') {
       return;
     }
     
     e.preventDefault();
+    
     // Get the mouse cursor position at startup
     pos3 = e.clientX;
     pos4 = e.clientY;
-    document.addEventListener('mouseup', closeDragElement);
+    
     document.addEventListener('mousemove', elementDrag);
-  }
+    document.addEventListener('mouseup', closeDragElement);
+  });
   
   function elementDrag(e) {
     e.preventDefault();
+    
     // Calculate the new cursor position
     pos1 = pos3 - e.clientX;
     pos2 = pos4 - e.clientY;
     pos3 = e.clientX;
     pos4 = e.clientY;
     
-    // Ensure the element stays within viewport
-    const viewport = {
-      width: window.innerWidth,
-      height: window.innerHeight
-    };
-    
-    // Get current position
-    const currentLeft = element.offsetLeft;
-    const currentTop = element.offsetTop;
-    
-    // Calculate new position
-    const newLeft = currentLeft - pos1;
-    const newTop = currentTop - pos2;
-    
-    // Get element dimensions
-    const elemWidth = element.offsetWidth;
-    const elemHeight = element.offsetHeight;
-    
-    // Calculate bounds to keep element partially visible
-    const minLeft = -elemWidth * 0.5;
-    const maxLeft = viewport.width - elemWidth * 0.5;
-    const minTop = 0;
-    const maxTop = viewport.height - 50; // Keep at least 50px visible
-    
-    // Apply the position within constraints
-    element.style.left = Math.min(Math.max(newLeft, minLeft), maxLeft) + "px";
-    element.style.top = Math.min(Math.max(newTop, minTop), maxTop) + "px";
+    // Set the element's new position directly (this is the critical part)
+    element.style.top = (element.offsetTop - pos2) + "px";
+    element.style.left = (element.offsetLeft - pos1) + "px";
   }
   
   function closeDragElement() {
@@ -1111,6 +1091,7 @@ function addOverlayStyles() {
       transition: all 0.2s ease;
       border: 1px solid rgba(255, 255, 255, 0.1);
       width: 220px;
+      cursor: move;
     }
     
     .trenchbot-content {
@@ -1167,7 +1148,7 @@ function addOverlayStyles() {
       color: rgba(255, 255, 255, 0.7);
       background: none;
       border: none;
-      cursor: pointer;
+      cursor: pointer !important;
       padding: 0;
       width: 20px;
       height: 20px;
