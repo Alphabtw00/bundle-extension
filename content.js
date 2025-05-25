@@ -1,635 +1,1479 @@
-// Content script for Axiom TrenchBot Bundle Info extension
-console.log('Axiom TrenchBot Bundle Info extension loaded');
-
-// Store current state
-let currentTokenAddress = '';
-let observer = null;
-let overlayAdded = false;
-let bundleData = null;
-let fullBundleData = null;
-let extensionEnabled = true; // Default enabled
-let bubbleMapVisible = false;
-
-// Initialize the extension
-function init() {
-  console.log('Axiom TrenchBot Bundle Info extension initialized');
+// TrenchBot Bundle Info Extension
+// Optimized content script
+(function() {
+  'use strict';
   
-  // Load user preferences
-  chrome.storage.sync.get(['extensionEnabled'], (result) => {
-    if (result.hasOwnProperty('extensionEnabled')) {
-      extensionEnabled = result.extensionEnabled;
-      console.log('Extension enabled state loaded:', extensionEnabled);
-    }
-  });
+  // State variables
+  let currentTokenAddress = null;
+  let overlayAdded = false;
+  let bubbleMapVisible = false;
+  let extensionEnabled = true;
+  let observer = null;
+  let d3Instance = null;
+  let currentVisualization = null;
+  let lastRefreshTime = 0;
+  let bubbleMapData = null;
+  const REFRESH_COOLDOWN = 5000; // 5 seconds
   
-  // Set up URL change listeners
-  setupUrlChangeListener();
+  // Wallet type icons
+  const WALLET_ICONS = {
+    regular: '👤',
+    sniper: '🎯',
+    new_wallet: '🆕',
+    copy_trader: '🔄',
+    team_bundle: '👨‍💻'
+  };
   
-  // Process the initial page
-  setTimeout(() => {
-    processCurrentPage();
-  }, 1500);
-}
-
-// Set up listeners for URL changes
-function setupUrlChangeListener() {
-  // Use mutation observer to detect DOM changes
-  observer = new MutationObserver(() => {
-    checkForUrlChange();
-  });
-  
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
-  });
-  
-  // Also check when the hash changes
-  window.addEventListener('hashchange', checkForUrlChange);
-  
-  // Check when page is navigated
-  window.addEventListener('popstate', checkForUrlChange);
-  
-  // Check periodically as fallback
-  setInterval(checkForUrlChange, 2000);
-}
-
-// Check if URL has changed and a new token is being viewed
-function checkForUrlChange() {
-  const url = window.location.href;
-  
-  // Check if we're on a token page
-  if (isTokenPage(url)) {
-    const parts = url.split('/');
-    const tokenAddress = parts[parts.length - 1].split('?')[0]; // Remove query params
-    
-    if (tokenAddress && tokenAddress !== currentTokenAddress) {
-      console.log('New token detected:', tokenAddress);
-      currentTokenAddress = tokenAddress;
-      
-      // Reset state
-      overlayAdded = false;
-      bubbleMapVisible = false;
-      
-      if (extensionEnabled) {
-        fetchTokenInfo(tokenAddress);
-      }
-    } else if (!overlayAdded && bundleData && extensionEnabled) {
-      // If URL hasn't changed but we haven't successfully added the overlay yet
-      console.log('Retrying overlay addition');
-      addOverlay(bundleData);
-    }
+  // Initialize when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
   } else {
-    // Not on a token page, remove overlay if present
-    removeOverlay();
-    currentTokenAddress = '';
+    init();
   }
-}
-
-// Check if the current URL is a token page
-function isTokenPage(url) {
-  return url.includes('axiom.trade/meme/') || url.includes('axiom.trade/token/');
-}
-
-// Process the current page
-function processCurrentPage() {
-  const url = window.location.href;
-  console.log('Processing current page:', url);
   
-  if (isTokenPage(url)) {
-    const parts = url.split('/');
-    const tokenAddress = parts[parts.length - 1].split('?')[0];
+  function init() {
+    console.log('TrenchBot Bundle Info extension initialized');
     
-    if (tokenAddress) {
-      console.log('Token detected:', tokenAddress);
-      currentTokenAddress = tokenAddress;
-      
-      if (extensionEnabled) {
-        fetchTokenInfo(tokenAddress);
+    // Load user preferences
+    chrome.storage.sync.get(['extensionEnabled'], (result) => {
+      if (result.hasOwnProperty('extensionEnabled')) {
+        extensionEnabled = result.extensionEnabled;
       }
+      
+      // Load D3.js dynamically
+      loadD3();
+      
+      // Setup URL change detection
+      setupUrlChangeListener();
+      
+      // Process current page
+      setTimeout(processCurrentPage, 500);
+    });
+    
+    // Listen for messages
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (request.action === 'toggleExtension') {
+        extensionEnabled = request.enabled;
+        
+        if (!extensionEnabled) {
+          removeOverlay();
+          removeBubbleMap();
+        } else if (currentTokenAddress) {
+          processTokenPage(currentTokenAddress);
+        }
+        
+        sendResponse({ success: true });
+      } else if (request.action === 'refreshData') {
+        if (currentTokenAddress) {
+          const now = Date.now();
+          
+          // Check if refresh is on cooldown
+          if (now - lastRefreshTime < REFRESH_COOLDOWN) {
+            sendResponse({ 
+              success: false, 
+              error: 'Refresh on cooldown', 
+              cooldownRemaining: Math.ceil((REFRESH_COOLDOWN - (now - lastRefreshTime)) / 1000)
+            });
+          } else {
+            removeOverlay();
+            lastRefreshTime = now;
+            processTokenPage(currentTokenAddress, true);
+            sendResponse({ success: true });
+          }
+        } else {
+          sendResponse({ success: false, error: 'No token page active' });
+        }
+        return true;
+      } else if (request.action === 'getStatus') {
+        const now = Date.now();
+        const canRefresh = now - lastRefreshTime >= REFRESH_COOLDOWN;
+        const cooldownRemaining = canRefresh ? 0 : Math.ceil((REFRESH_COOLDOWN - (now - lastRefreshTime)) / 1000);
+        
+        sendResponse({
+          enabled: extensionEnabled,
+          onTokenPage: isTokenPage(window.location.href),
+          currentTokenAddress: currentTokenAddress,
+          canRefresh: canRefresh,
+          cooldownRemaining: cooldownRemaining
+        });
+      }
+    });
+  }
+  
+  function loadD3() {
+    // Since D3 is loaded via manifest.json's content_scripts section before content.js,
+    // it should already be available as window.d3
+    if (window.d3) {
+      console.log('D3.js is already loaded');
+      d3Instance = window.d3;
+      return Promise.resolve(window.d3);
+    } else {
+      console.error('D3.js is not available');
+      return Promise.reject(new Error('D3.js is not available'));
     }
   }
-}
-
-// Remove the overlay
-function removeOverlay() {
-  const overlay = document.getElementById('trenchbot-overlay');
-  if (overlay) {
-    overlay.remove();
-  }
   
-  const bubbleMap = document.getElementById('trenchbot-bubble-map');
-  if (bubbleMap) {
-    bubbleMap.remove();
-  }
-  
-  overlayAdded = false;
-  bubbleMapVisible = false;
-}
-
-// Fetch token info from TrenchBot
-async function fetchTokenInfo(pairAddress) {
-  try {
-    console.log('Fetching token info for pair:', pairAddress);
-    
-    // First try to get the base token address (if needed)
-    let tokenAddress = pairAddress;
-    let tokenName = "Token";
-    let tokenSymbol = "";
-    
-    try {
-      const response = await fetch(`https://api.dexscreener.com/latest/dex/pairs/solana/${pairAddress}`);
-      
-      if (!response.ok) {
-        throw new Error(`DexScreener API error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      
-      if (data && data.pairs && data.pairs.length > 0) {
-        const baseToken = data.pairs[0].baseToken;
-        tokenAddress = baseToken.address;
-        tokenName = baseToken.name;
-        tokenSymbol = baseToken.symbol;
-        
-        console.log(`Token found: ${tokenName} (${tokenSymbol}) - ${tokenAddress}`);
-      }
-    } catch (error) {
-      console.log('Using original token address, DexScreener error:', error);
+  function setupUrlChangeListener() {
+    // Clean up existing observer
+    if (observer) {
+      observer.disconnect();
     }
     
-    // Now fetch bundle info from trench.bot
-    try {
-      const response = await fetch(`https://trench.bot/api/bundle/bundle_full/${tokenAddress}`);
+    // Watch for URL changes via history API
+    window.addEventListener('popstate', checkForUrlChange);
+    
+    // Watch for DOM changes that might indicate navigation
+    observer = new MutationObserver(checkForUrlChange);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    
+    // Periodic check as fallback
+    setInterval(checkForUrlChange, 2000);
+  }
+  
+  function checkForUrlChange() {
+    const url = window.location.href;
+    
+    if (isTokenPage(url)) {
+      const tokenAddress = extractTokenAddress(url);
       
-      if (!response.ok) {
-        throw new Error(`TrenchBot API error: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      console.log('TrenchBot response:', data);
-      
-      if (data) {
-        fullBundleData = data; // Store the full data for the bubble map
+      if (tokenAddress && tokenAddress !== currentTokenAddress) {
+        // Clear existing state when navigating to a new token
+        removeOverlay();
+        removeBubbleMap();
         
-        const bundleInfo = {
-          tokenName: tokenName,
-          tokenSymbol: tokenSymbol,
-          tokenAddress: tokenAddress,
-          totalPercentageBundled: data.total_percentage_bundled || 0,
-          totalHoldingPercentage: data.total_holding_percentage || 0,
-          totalBundles: data.total_bundles || 0,
-          totalSolSpent: data.total_sol_spent || 0
-        };
+        currentTokenAddress = tokenAddress;
         
-        console.log('Bundle info:', bundleInfo);
-        bundleData = bundleInfo;
-        
-        // Add the overlay to the page
         if (extensionEnabled) {
-          addOverlay(bundleInfo);
+          processTokenPage(tokenAddress);
         }
       }
-    } catch (error) {
-      console.error('Error fetching bundle info:', error);
-      showErrorOverlay(error.message);
+    } else if (currentTokenAddress) {
+      // Not on a token page anymore
+      removeOverlay();
+      removeBubbleMap();
+      currentTokenAddress = null;
     }
-  } catch (error) {
-    console.error('Error in token info flow:', error);
-    showErrorOverlay(error.message);
-  }
-}
-
-// Show error in the overlay
-function showErrorOverlay(errorMessage) {
-  const existingOverlay = document.getElementById('trenchbot-overlay');
-  if (existingOverlay) {
-    existingOverlay.remove();
   }
   
-  const overlay = document.createElement('div');
-  overlay.id = 'trenchbot-overlay';
-  overlay.className = 'trenchbot-overlay';
+  function isTokenPage(url) {
+    return url.includes('axiom.trade/meme/') || url.includes('axiom.trade/token/');
+  }
   
-  overlay.innerHTML = `
-    <div class="trenchbot-content">
-      <div class="trenchbot-header trenchbot-error">
-        <img width="14" height="14" src="https://trench.bot/favicon.ico" style="border-radius: 50%;">
-        <span class="trenchbot-percentage">Error</span>
-        <button id="trenchbot-refresh" class="trenchbot-refresh-button" title="Refresh data">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-          </svg>
-        </button>
+  function extractTokenAddress(url) {
+    const parts = url.split('/');
+    return parts[parts.length - 1].split('?')[0]; // Remove query params
+  }
+  
+  function processCurrentPage() {
+    const url = window.location.href;
+    
+    if (isTokenPage(url)) {
+      const tokenAddress = extractTokenAddress(url);
+      
+      if (tokenAddress) {
+        currentTokenAddress = tokenAddress;
+        
+        if (extensionEnabled) {
+          processTokenPage(tokenAddress);
+        }
+      }
+    }
+  }
+  
+  function processTokenPage(tokenAddress, forceRefresh = false) {
+    // Fetch token data from background script (which handles caching)
+    chrome.runtime.sendMessage(
+      { action: 'fetchTokenInfo', tokenAddress, forceRefresh },
+      (response) => {
+        if (response && response.success) {
+          // Store the data globally for potential refreshes of bubble map
+          bubbleMapData = response.data;
+          addOverlay(response.data, response.cacheAge || 0);
+          
+          // If bubble map is visible, refresh it too
+          if (bubbleMapVisible) {
+            updateBubbleMap(response.data);
+          }
+        } else {
+          showErrorOverlay(response?.error || 'Unknown error');
+        }
+      }
+    );
+  }
+  
+  function addOverlay(bundleInfo, cacheAge) {
+    // Remove any existing overlay
+    removeOverlay();
+    
+    // Create the overlay element
+    const overlay = document.createElement('div');
+    overlay.id = 'trenchbot-overlay';
+    overlay.className = 'trenchbot-overlay';
+    
+    // Format the bundled percentage with color based on value
+    const formattedPercentage = bundleInfo.totalHoldingPercentage.toFixed(2);
+    let colorClass = '';
+    
+    if (bundleInfo.totalHoldingPercentage >= 70) {
+      colorClass = 'trenchbot-error-gradient'; // High bundling (red)
+    } else if (bundleInfo.totalHoldingPercentage >= 40) {
+      colorClass = 'trenchbot-warning-gradient'; // Medium bundling (yellow)
+    } else {
+      colorClass = 'trenchbot-success-gradient'; // Low bundling (green)
+    }
+    
+    // Create a timestamp string
+    let timeInfo = 'now';
+    if (cacheAge > 0) {
+      timeInfo = cacheAge > 60 
+        ? `${Math.floor(cacheAge / 60)}m ${cacheAge % 60}s ago` 
+        : `${cacheAge}s ago`;
+    }
+    
+    // Simple compact design with minimal info
+    overlay.innerHTML = `
+      <div class="trenchbot-content">
+        <div class="trenchbot-header">
+          <img src="https://trench.bot/favicon.ico" alt="TrenchBot" width="16" height="16">
+          <span class="trenchbot-percentage ${colorClass}">${formattedPercentage}%</span>
+          <button id="trenchbot-refresh" class="trenchbot-refresh-button" title="Refresh data">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </button>
+        </div>
+        
+        <div class="trenchbot-footer">
+          <div class="trenchbot-info-row">
+            <span class="trenchbot-label">Bundles: <span class="trenchbot-label-value">${bundleInfo.totalBundles || 0}</span></span>
+            <span class="trenchbot-timestamp">${timeInfo}</span>
+          </div>
+          
+          <div class="trenchbot-actions">
+            <button id="trenchbot-more-info" class="trenchbot-btn trenchbot-btn-primary">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="16" x2="12" y2="12"/>
+                <line x1="12" y1="8" x2="12.01" y2="8"/>
+              </svg>
+              More Info
+            </button>
+          </div>
+        </div>
       </div>
-      <div class="trenchbot-footer">
-        <span class="trenchbot-label">TrenchBot API Error</span>
+      <button id="trenchbot-close" class="trenchbot-close-button" title="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    `;
+    
+    // Position at the top right
+    overlay.style.top = '80px';
+    overlay.style.right = '20px';
+    
+    // Add to document
+    document.body.appendChild(overlay);
+    
+    // Store bundle data for bubble map
+    overlay.bundleData = bundleInfo;
+    
+    // Set up event listeners
+    setupOverlayEvents(overlay);
+    
+    overlayAdded = true;
+  }
+  
+  function setupOverlayEvents(overlay) {
+    // Refresh button
+    const refreshButton = overlay.querySelector('#trenchbot-refresh');
+    if (refreshButton) {
+      refreshButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        
+        const now = Date.now();
+        // Check if on cooldown
+        if (now - lastRefreshTime < REFRESH_COOLDOWN) {
+          // Show cooldown visual feedback
+          refreshButton.classList.add('trenchbot-cooldown');
+          const remainingCooldown = Math.ceil((REFRESH_COOLDOWN - (now - lastRefreshTime)) / 1000);
+          refreshButton.setAttribute('title', `Wait ${remainingCooldown}s`);
+          
+          // Remove cooldown class after remaining time
+          setTimeout(() => {
+            refreshButton.classList.remove('trenchbot-cooldown');
+            refreshButton.setAttribute('title', 'Refresh data');
+          }, REFRESH_COOLDOWN - (now - lastRefreshTime));
+          
+          return;
+        }
+        
+        // Not on cooldown, perform refresh
+        refreshButton.classList.add('trenchbot-refreshing');
+        lastRefreshTime = now;
+        processTokenPage(currentTokenAddress, true);
+      });
+    }
+    
+    // More info button
+    const moreInfoButton = overlay.querySelector('#trenchbot-more-info');
+    if (moreInfoButton) {
+      moreInfoButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBubbleMap(overlay.bundleData);
+      });
+    }
+    
+    // Close button
+    const closeButton = overlay.querySelector('#trenchbot-close');
+    if (closeButton) {
+      closeButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        overlay.remove();
+        overlayAdded = false;
+      });
+    }
+    
+    // Make draggable
+    makeElementDraggable(overlay);
+  }
+  
+  function showErrorOverlay(errorMessage) {
+    // Remove any existing overlay
+    removeOverlay();
+    
+    // Create the overlay element
+    const overlay = document.createElement('div');
+    overlay.id = 'trenchbot-overlay';
+    overlay.className = 'trenchbot-overlay';
+    
+    // Compact error overlay
+    overlay.innerHTML = `
+      <div class="trenchbot-content">
+        <div class="trenchbot-header">
+          <img src="https://trench.bot/favicon.ico" alt="TrenchBot" width="16" height="16">
+          <span class="trenchbot-percentage trenchbot-error-gradient">Error</span>
+          <button id="trenchbot-refresh" class="trenchbot-refresh-button" title="Refresh data">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </button>
+        </div>
+        
+        <div class="trenchbot-footer">
+          <div class="trenchbot-info-row">
+            <span class="trenchbot-label" style="line-height: 1.3; text-align: center; width: 100%;">
+              Bundle data not available for this token
+            </span>
+          </div>
+          
+          <div class="trenchbot-actions">
+            <button id="trenchbot-refresh-error" class="trenchbot-btn">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+              </svg>
+              Try Again
+            </button>
+          </div>
+        </div>
       </div>
-    </div>
-    <button id="trenchbot-close" class="trenchbot-close-button">&times;</button>
-  `;
-  
-  document.body.appendChild(overlay);
-  
-  // Position at the top right
-  overlay.style.top = '80px';
-  overlay.style.right = '20px';
-  overlay.style.bottom = 'auto';
-  
-  // Add event listeners
-  const refreshButton = document.getElementById('trenchbot-refresh');
-  if (refreshButton) {
-    refreshButton.addEventListener('click', (e) => {
+      <button id="trenchbot-close" class="trenchbot-close-button" title="Close">
+        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    `;
+    
+    // Position at the top right
+    overlay.style.top = '80px';
+    overlay.style.right = '20px';
+    
+    // Add to document
+    document.body.appendChild(overlay);
+    
+    // Set up event listeners
+    const refreshButton = overlay.querySelector('#trenchbot-refresh-error');
+    if (refreshButton) {
+      refreshButton.addEventListener('click', (e) => {
       e.stopPropagation();
+        
+      const now = Date.now();
+      // Check if on cooldown
+      if (now - lastRefreshTime < REFRESH_COOLDOWN) {
+        // Show cooldown visual feedback
+        refreshButton.classList.add('trenchbot-cooldown');
+        const remainingCooldown = Math.ceil((REFRESH_COOLDOWN - (now - lastRefreshTime)) / 1000);
+        refreshButton.setAttribute('title', `Wait ${remainingCooldown}s`);
+        
+        // Remove cooldown class after remaining time
+        setTimeout(() => {
+          refreshButton.classList.remove('trenchbot-cooldown');
+          refreshButton.setAttribute('title', 'Try Again');
+        }, REFRESH_COOLDOWN - (now - lastRefreshTime));
+        
+        return;
+      }
+      
+      // Not on cooldown, perform refresh
       refreshButton.classList.add('trenchbot-refreshing');
-      fetchTokenInfo(currentTokenAddress);
-    });
+      lastRefreshTime = now;
+      processTokenPage(currentTokenAddress, true);
+      });
+    }
+    
+    const closeButton = overlay.querySelector('#trenchbot-close');
+    if (closeButton) {
+      closeButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        overlay.remove();
+        overlayAdded = false;
+      });
+    }
+    
+    // Make draggable with improved dragging
+    makeElementDraggable(overlay);
+    
+    overlayAdded = true;
   }
   
-  const closeButton = document.getElementById('trenchbot-close');
-  if (closeButton) {
-    closeButton.addEventListener('click', () => {
+  function removeOverlay() {
+    const overlay = document.getElementById('trenchbot-overlay');
+    if (overlay) {
       overlay.remove();
       overlayAdded = false;
-    });
+    }
   }
   
-  makeOverlayDraggable(overlay);
-  addOverlayStyles();
-  
-  overlayAdded = true;
-  console.log('Error overlay added');
-}
-
-function addOverlay(bundleInfo) {
-  // Remove any existing overlay
-  const existingOverlay = document.getElementById('trenchbot-overlay');
-  if (existingOverlay) {
-    existingOverlay.remove();
+  function toggleBubbleMap(bundleData) {
+    if (bubbleMapVisible) {
+      removeBubbleMap();
+    } else {
+      createBubbleMap(bundleData);
+    }
   }
   
-  // Create the overlay element
-  const overlay = document.createElement('div');
-  overlay.id = 'trenchbot-overlay';
-  overlay.className = 'trenchbot-overlay';
-  
-  // Format the bundled percentage with color based on value
-  const formattedPercentage = bundleInfo.totalHoldingPercentage.toFixed(2);
-  let colorClass = 'trenchbot-green'; // Default color (green)
-  
-  if (bundleInfo.totalHoldingPercentage >= 70) {
-    colorClass = 'trenchbot-red'; // High bundling (red)
-  } else if (bundleInfo.totalHoldingPercentage >= 40) {
-    colorClass = 'trenchbot-yellow'; // Medium bundling (yellow)
+  function updateBubbleMap(bundleData) {
+    // If bubble map is visible, update it with the new data
+    if (bubbleMapVisible) {
+      // Show loading overlay
+      const bubbleMap = document.getElementById('trenchbot-bubble-map');
+      
+      if (bubbleMap) {
+        // Add loading indicator
+        const loading = document.createElement('div');
+        loading.className = 'trenchbot-loading';
+        loading.innerHTML = `
+          <div class="trenchbot-loading-spinner"></div>
+          <div class="trenchbot-loading-text">Refreshing data...</div>
+        `;
+        bubbleMap.appendChild(loading);
+        
+        // Update the map with new data after a short delay (for animation)
+        setTimeout(() => {
+          removeBubbleMap();
+          createBubbleMap(bundleData);
+        }, 800);
+      }
+    }
   }
   
-  overlay.innerHTML = `
-    <div class="trenchbot-content">
-      <div class="trenchbot-header ${colorClass}">
-        <img width="14" height="14" src="https://trench.bot/favicon.ico" style="border-radius: 50%;">
-        <span class="trenchbot-percentage">${formattedPercentage}%</span>
-        <button id="trenchbot-refresh" class="trenchbot-refresh-button" title="Refresh data">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-          </svg>
-        </button>
-      </div>
-      <div class="trenchbot-footer">
-        <span class="trenchbot-label">TrenchBot Holding</span>
-        <button id="trenchbot-more-info" class="trenchbot-more-info-button">
-          <span>More Info</span>
-        </button>
-      </div>
-    </div>
-    <button id="trenchbot-close" class="trenchbot-close-button" title="Close">&times;</button>
-  `;
-  
-  // Add the overlay to the document
-  document.body.appendChild(overlay);
-  
-  // Position at the top right
-  overlay.style.top = '80px';
-  overlay.style.right = '20px';
-  overlay.style.bottom = 'auto';
-  
-  // Add event listeners
-  const refreshButton = document.getElementById('trenchbot-refresh');
-  if (refreshButton) {
-    refreshButton.addEventListener('click', (e) => {
-      e.stopPropagation();
-      refreshButton.classList.add('trenchbot-refreshing');
-      fetchTokenInfo(currentTokenAddress);
-    });
-  }
-  
-  const moreInfoButton = document.getElementById('trenchbot-more-info');
-  if (moreInfoButton) {
-    moreInfoButton.addEventListener('click', (e) => {
-      e.stopPropagation();
-      toggleBubbleMap();
-    });
-  }
-  
-  // THIS IS THE ONLY ACTUAL CHANGE - Add the close button event directly to the button element itself
-  // instead of using document.getElementById which sometimes has race conditions
-  const closeButton = overlay.querySelector('#trenchbot-close');
-  if (closeButton) {
-    closeButton.onclick = (e) => {
-      e.stopPropagation();
-      overlay.remove();
-      overlayAdded = false;
-    };
-  }
-  
-  // Make the overlay draggable - but DON'T pass the close button to be draggable
-  makeOverlayDraggable(overlay);
-  
-  // Add styles
-  addOverlayStyles();
-  
-  overlayAdded = true;
-  console.log('Overlay added successfully');
-}
-
-// Toggle the bubble map display
-function toggleBubbleMap() {
-  if (bubbleMapVisible) {
-    // Remove existing bubble map
+  function removeBubbleMap() {
     const bubbleMap = document.getElementById('trenchbot-bubble-map');
     if (bubbleMap) {
+      // Stop any running D3 simulation
+      if (currentVisualization && currentVisualization.simulation) {
+        currentVisualization.simulation.stop();
+      }
+      
       bubbleMap.remove();
       bubbleMapVisible = false;
+      currentVisualization = null;
     }
-  } else {
-    // Create and show bubble map
-    createBubbleMap();
-    bubbleMapVisible = true;
-  }
-}
-
-// Create and display the bubble map visualization
-function createBubbleMap() {
-  // Check if we have the full data needed
-  if (!fullBundleData || !fullBundleData.bundles) {
-    console.error('No bundle data available for bubble map');
-    return;
   }
   
-  // Remove existing bubble map if any
-  const existingBubbleMap = document.getElementById('trenchbot-bubble-map');
-  if (existingBubbleMap) {
-    existingBubbleMap.remove();
-  }
-  
-  // Create the bubble map container
-  const bubbleMap = document.createElement('div');
-  bubbleMap.id = 'trenchbot-bubble-map';
-  bubbleMap.className = 'trenchbot-bubble-map';
-  
-  // Get ticker and other stats
-  const ticker = fullBundleData.ticker || 'Token';
-  const totalBundles = fullBundleData.total_bundles || 0;
-  const solSpent = fullBundleData.total_sol_spent ? fullBundleData.total_sol_spent.toFixed(2) : '0.00';
-  const bundledTotal = fullBundleData.total_percentage_bundled ? fullBundleData.total_percentage_bundled.toFixed(2) : '0.00';
-  const holdPercentage = fullBundleData.total_holding_percentage ? fullBundleData.total_holding_percentage.toFixed(2) : '0.00';
-  
-  // Get the list of wallet categories for filtering
-  const walletCategories = new Set();
-  if (fullBundleData.bundles) {
-    Object.values(fullBundleData.bundles).forEach(bundle => {
+  function createBubbleMap(bundleData) {
+    if (!bundleData || !bundleData.bundles) {
+      console.error('No bundle data available');
+      return;
+    }
+    
+    // Remove existing map if any
+    removeBubbleMap();
+    
+    // Create bubble map container
+    const bubbleMap = document.createElement('div');
+    bubbleMap.id = 'trenchbot-bubble-map';
+    bubbleMap.className = 'trenchbot-bubble-map';
+    
+    // Get data for display
+    const ticker = bundleData.ticker || bundleData.tokenSymbol || 'Token';
+    const totalBundles = bundleData.totalBundles || 0;
+    const solSpent = bundleData.totalSolSpent ? bundleData.totalSolSpent.toFixed(2) : '0.00';
+    const bundledTotal = bundleData.totalPercentageBundled ? bundleData.totalPercentageBundled.toFixed(2) : '0.00';
+    const holdPercentage = bundleData.totalHoldingPercentage ? bundleData.totalHoldingPercentage.toFixed(2) : '0.00';
+    
+    // Get wallet categories for filtering
+    const walletCategories = new Set();
+    Object.values(bundleData.bundles).forEach(bundle => {
       if (bundle.wallet_categories) {
         Object.values(bundle.wallet_categories).forEach(category => {
           walletCategories.add(category);
         });
       }
     });
-  }
-  
-  // Create the bubble map content
-  bubbleMap.innerHTML = `
-    <div class="trenchbot-bubble-map-header">
-      <div class="trenchbot-bubble-map-title">
-        <div class="trenchbot-bubble-map-ticker">
-          <img width="16" height="16" src="https://trench.bot/favicon.ico" style="border-radius: 50%; margin-right: 8px;">
-          <span>Ticker: ${ticker}</span>
-        </div>
-        <div class="trenchbot-bubble-map-controls">
-          <button id="bubble-map-close" class="trenchbot-close-button" title="Close">&times;</button>
-        </div>
-      </div>
-      
-      <div class="trenchbot-bubble-map-stats">
-        <div class="trenchbot-stat-item">
-          <span class="trenchbot-stat-label">Total Bundles:</span>
-          <span class="trenchbot-stat-value">${totalBundles}</span>
-        </div>
-        <div class="trenchbot-stat-item">
-          <span class="trenchbot-stat-label">SOL Spent:</span>
-          <span class="trenchbot-stat-value">${solSpent} SOL</span>
-        </div>
-        <div class="trenchbot-stat-item">
-          <span class="trenchbot-stat-label">Bundled Total:</span>
-          <span class="trenchbot-stat-value">${bundledTotal}%</span>
-        </div>
-        <div class="trenchbot-stat-item">
-          <span class="trenchbot-stat-label">Hold Percentage:</span>
-          <span class="trenchbot-stat-value">${holdPercentage}%</span>
-        </div>
-      </div>
-      
-      <div class="trenchbot-bubble-map-filters">
-        <div class="trenchbot-filter-group">
-          <span class="trenchbot-filter-group-label">View:</span>
-          <label class="trenchbot-filter-option">
-            <input type="radio" name="view-filter" value="holding" checked> 
-            <span>Holding</span>
-          </label>
-          <label class="trenchbot-filter-option">
-            <input type="radio" name="view-filter" value="all"> 
-            <span>All</span>
-          </label>
+    
+    // Create bubble map UI with improved SVG icons
+    bubbleMap.innerHTML = `
+      <div class="trenchbot-bubble-map-header">
+        <div class="trenchbot-bubble-map-title">
+          <div class="trenchbot-bubble-map-ticker">
+            <img src="https://trench.bot/favicon.ico" alt="TrenchBot">
+            <span>Ticker: $${ticker}</span>
+          </div>
+          <div class="trenchbot-bubble-map-controls">
+            <button id="trenchbot-refresh-bubbles" class="trenchbot-btn" title="Refresh Data">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+              </svg>
+              Refresh
+            </button>
+            <button id="bubble-map-close" class="trenchbot-btn" title="Close">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+              Close
+            </button>
+          </div>
         </div>
         
-        <div class="trenchbot-filter-group">
-          <span class="trenchbot-filter-group-label">Type:</span>
-          <select id="wallet-type-filter" class="trenchbot-select">
-            <option value="all">All Types</option>
-            ${Array.from(walletCategories).map(category => 
-              `<option value="${category}">${category.replace(/_/g, ' ')}</option>`
-            ).join('')}
-          </select>
+        <div class="trenchbot-bubble-map-stats">
+          <div class="trenchbot-stat-item">
+            <div class="trenchbot-stat-label">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                <circle cx="9" cy="7" r="4"></circle>
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+              </svg>
+              Total Bundles
+            </div>
+            <div class="trenchbot-stat-value">${totalBundles}</div>
+          </div>
+          
+          <div class="trenchbot-stat-item">
+            <div class="trenchbot-stat-label">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M7.92 12.5a16 16 0 0 0 8.16 0 8 8 0 1 0-8.16 0z"></path>
+              </svg>
+              SOL Spent
+            </div>
+            <div class="trenchbot-stat-value">${solSpent} SOL</div>
+          </div>
+          
+          <div class="trenchbot-stat-item">
+            <div class="trenchbot-stat-label">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M16 12H8l4-4v8z"></path>
+              </svg>
+              Bundled Total
+            </div>
+            <div class="trenchbot-stat-value">${bundledTotal}%</div>
+          </div>
+          
+          <div class="trenchbot-stat-item">
+            <div class="trenchbot-stat-label">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                <line x1="9" y1="9" x2="15" y2="15"></line>
+                <line x1="15" y1="9" x2="9" y2="15"></line>
+              </svg>
+              Hold Percentage
+            </div>
+            <div class="trenchbot-stat-value">${holdPercentage}%</div>
+          </div>
+        </div>
+        
+        <div class="trenchbot-bubble-map-filters">
+          <div class="trenchbot-filter-group">
+            <span class="trenchbot-filter-group-label">View:</span>
+            <label class="trenchbot-filter-option">
+              <input type="radio" name="view-filter" value="holding" checked> 
+              <span>Holding</span>
+            </label>
+            <label class="trenchbot-filter-option">
+              <input type="radio" name="view-filter" value="all"> 
+              <span>All</span>
+            </label>
+          </div>
+          
+          <div class="trenchbot-filter-group">
+            <span class="trenchbot-filter-group-label">Type:</span>
+            <select id="wallet-type-filter" class="trenchbot-select">
+              <option value="all">All Types</option>
+              ${Array.from(walletCategories).map(category => 
+                `<option value="${category}">${category.replace(/_/g, ' ')}</option>`
+              ).join('')}
+            </select>
+          </div>
         </div>
       </div>
-    </div>
+      
+      <div class="trenchbot-bubbles-container"></div>
+      
+      <div class="trenchbot-bubble-map-legend">
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-color trenchbot-legend-holding"></div>
+          <span>Holding</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-color trenchbot-legend-sold"></div>
+          <span>Sold</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-icon">👤</div>
+          <span>Regular</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-icon">🎯</div>
+          <span>Sniper</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-icon">🆕</div>
+          <span>New Wallet</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-icon">👨‍💻</div>
+          <span>Team Bundle</span>
+        </div>
+        <div class="trenchbot-legend-item">
+          <div class="trenchbot-legend-icon">🔄</div>
+          <span>Copy Trader</span>
+        </div>
+      </div>
+    `;
     
-    <div class="trenchbot-bubbles-container"></div>
+    // Add to document
+    document.body.appendChild(bubbleMap);
     
-    <div class="trenchbot-bubble-map-legend">
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-color trenchbot-legend-holding"></div>
-        <span>Holding</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-color trenchbot-legend-sold"></div>
-        <span>Sold</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-icon">👤</div>
-        <span>Regular</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-icon">🔫</div>
-        <span>Sniper</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-icon">🆕</div>
-        <span>New Wallet</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-icon">👨‍💻</div>
-        <span>Team Bundle</span>
-      </div>
-      <div class="trenchbot-legend-item">
-        <div class="trenchbot-legend-icon">🔄</div>
-        <span>Copy Trader</span>
-      </div>
-    </div>
-  `;
-  
-  // Add the bubble map to the document
-  document.body.appendChild(bubbleMap);
-  
-  // Get the bubbles container
-  const bubblesContainer = bubbleMap.querySelector('.trenchbot-bubbles-container');
-  
-  // Make the bubble map draggable
-  makeOverlayDraggable(bubbleMap, '.trenchbot-bubble-map-title');
-  
-  // Add event listeners
-  document.getElementById('bubble-map-close').addEventListener('click', () => {
-    bubbleMap.remove();
-    bubbleMapVisible = false;
-  });
-  
-  // Add listeners for filters
-  const viewFilters = bubbleMap.querySelectorAll('input[name="view-filter"]');
-  viewFilters.forEach(filter => {
-    filter.addEventListener('change', () => {
-      renderBubbles(bubblesContainer);
+    // Make the bubble map draggable
+    makeElementDraggable(bubbleMap, '.trenchbot-bubble-map-title');
+    
+    // Get the bubbles container
+    const bubblesContainer = bubbleMap.querySelector('.trenchbot-bubbles-container');
+    
+    // Set up event listeners
+    bubbleMap.querySelector('#bubble-map-close').addEventListener('click', () => {
+      removeBubbleMap();
     });
-  });
-  
-  const typeFilter = bubbleMap.querySelector('#wallet-type-filter');
-  if (typeFilter) {
-    typeFilter.addEventListener('change', () => {
-      renderBubbles(bubblesContainer);
+    
+    // Set up refresh button in the bubble map
+    bubbleMap.querySelector('#trenchbot-refresh-bubbles').addEventListener('click', () => {
+      const now = Date.now();
+      
+      // Check if refresh is on cooldown
+      if (now - lastRefreshTime < REFRESH_COOLDOWN) {
+        const refreshBtn = bubbleMap.querySelector('#trenchbot-refresh-bubbles');
+        refreshBtn.classList.add('trenchbot-btn-disabled');
+        
+        const remainingCooldown = Math.ceil((REFRESH_COOLDOWN - (now - lastRefreshTime)) / 1000);
+        refreshBtn.innerHTML = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+          </svg>
+          Wait ${remainingCooldown}s
+        `;
+        
+        setTimeout(() => {
+          refreshBtn.classList.remove('trenchbot-btn-disabled');
+          refreshBtn.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+            Refresh
+          `;
+        }, REFRESH_COOLDOWN - (now - lastRefreshTime));
+        
+        return;
+      }
+      
+      // Not on cooldown, perform refresh with animation
+      lastRefreshTime = now;
+      
+      // Show loading indicator
+      const loading = document.createElement('div');
+      loading.className = 'trenchbot-loading';
+      loading.innerHTML = `
+        <div class="trenchbot-loading-spinner"></div>
+        <div class="trenchbot-loading-text">Refreshing data...</div>
+      `;
+      bubbleMap.appendChild(loading);
+      
+      // Refresh data through main process
+      processTokenPage(currentTokenAddress, true);
     });
+    
+    // Set up filter change handlers
+    const viewFilters = bubbleMap.querySelectorAll('input[name="view-filter"]');
+    viewFilters.forEach(filter => {
+      filter.addEventListener('change', () => {
+        renderBubbles(bubblesContainer, bundleData);
+      });
+    });
+    
+    const typeFilter = bubbleMap.querySelector('#wallet-type-filter');
+    if (typeFilter) {
+      typeFilter.addEventListener('change', () => {
+        renderBubbles(bubblesContainer, bundleData);
+      });
+    }
+    
+    // Initial render of bubbles
+    renderBubbles(bubblesContainer, bundleData);
+    
+    bubbleMapVisible = true;
   }
-  
-  // Add bubble map styles
-  addBubbleMapStyles();
-  
-  // Initial render of bubbles
-  renderBubbles(bubblesContainer);
-}
 
-// Render the bubbles based on current filter settings
-function renderBubbles(container) {
-  // Clear existing bubbles
-  container.innerHTML = '';
-  
-  // Get filter settings
-  const showOnlyHolding = document.querySelector('input[name="view-filter"][value="holding"]').checked;
-  const selectedType = document.querySelector('#wallet-type-filter').value;
-  
-  // Check if we have the data we need
-  if (!fullBundleData || !fullBundleData.bundles) {
-    const noData = document.createElement('div');
-    noData.className = 'trenchbot-no-data-message';
-    noData.textContent = 'No bundle data available';
-    container.appendChild(noData);
-    return;
-  }
-  
-  // Create bubbles based on bundle data
-  const bundles = Object.entries(fullBundleData.bundles).map(([id, bundle]) => {
-    return {
+  function renderBubbles(container, bundleData) {
+    // Get filter settings
+    const showOnlyHolding = document.querySelector('input[name="view-filter"][value="holding"]').checked;
+    const selectedType = document.querySelector('#wallet-type-filter').value;
+    
+    // Create data array from bundle info
+    const bundles = Object.entries(bundleData.bundles).map(([id, bundle]) => ({
       id,
       ...bundle
-    };
-  });
-  
-  // Sort bundles by size (percentage) in descending order
-  bundles.sort((a, b) => b.token_percentage - a.token_percentage);
-  
-  // Set up the physics simulation for bubbles
-  setupPhysicsSimulation(container, bundles, showOnlyHolding, selectedType);
-}
-
-// Set up a simple physics simulation for the bubbles
-function setupPhysicsSimulation(container, bundles, showOnlyHolding, selectedType) {
-  // Filter bundles based on criteria
-  const filteredBundles = bundles.filter(bundle => {
-    // Skip if we're only showing holding wallets and this one has no holdings
-    if (showOnlyHolding && bundle.holding_amount <= 0) {
-      return false;
-    }
+    }));
     
-    // Check if wallet type matches filter
-    if (selectedType !== 'all') {
-      const hasMatchingWallet = Object.values(bundle.wallet_categories || {}).some(
-        category => category === selectedType
-      );
-      
-      if (!hasMatchingWallet) {
+    // Sort bundles by size (percentage) in descending order
+    bundles.sort((a, b) => b.token_percentage - a.token_percentage);
+    
+    // Filter based on criteria
+    const filteredBundles = bundles.filter(bundle => {
+      // Skip if we're only showing holding wallets and this one has no holdings
+      if (showOnlyHolding && bundle.holding_amount <= 0) {
         return false;
       }
+      
+      // Check if wallet type matches filter
+      if (selectedType !== 'all') {
+        // Only check primary category, ignore wallet_categories
+        if (bundle.bundle_analysis && bundle.bundle_analysis.primary_category) {
+          return bundle.bundle_analysis.primary_category === selectedType;
+        }
+        
+        // If bundle analysis not available, fall back to first wallet category
+        if (bundle.wallet_categories) {
+          const primaryCategory = getPrimaryCategory(bundle);
+          return primaryCategory === selectedType;
+        }
+        
+        return false; // No matching category found
+      }
+      
+      return true;
+    });
+    
+    // Check if we have data after filtering
+    if (filteredBundles.length === 0) {
+      container.innerHTML = `
+        <div class="trenchbot-no-data-message">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+          No bundles match the current filters
+        </div>
+      `;
+      return;
     }
     
-    return true;
-  });
-  
-  // If no bubbles match filters, show message
-  if (filteredBundles.length === 0) {
-    const noData = document.createElement('div');
-    noData.className = 'trenchbot-no-data-message';
-    noData.textContent = 'No bundles match the current filters';
-    container.appendChild(noData);
-    return;
+    // If D3 is loaded, use it for visualization
+    if (d3Instance) {
+      createD3Visualization(container, filteredBundles);
+    } else {
+      // If D3 not loaded, use basic visualization instead
+      createBasicVisualization(container, filteredBundles);
+    }
+  }
+
+  function createBasicVisualization(container, bundles) {
+    // Clear the container
+    container.innerHTML = '';
+    
+    // Create a simple grid layout for the bundles
+    const grid = document.createElement('div');
+    grid.className = 'trenchbot-basic-grid';
+    container.appendChild(grid);
+    
+    // Add each bundle as a simple circle
+    bundles.forEach((bundle, index) => {
+      const bubble = document.createElement('div');
+      bubble.className = `trenchbot-basic-bubble`;
+      
+      // Get primary category
+      const primaryCategory = getPrimaryCategory(bundle);
+      const emoji = WALLET_ICONS[primaryCategory] || WALLET_ICONS.regular;
+      
+      // Size based on percentage
+      const size = Math.max(40, Math.min(120, 40 + bundle.token_percentage * 1.5));
+      bubble.style.width = `${size}px`;
+      bubble.style.height = `${size}px`;
+      
+      // Calculate what percentage of this bundle's tokens are still held
+      const totalTokenPercentage = bundle.token_percentage || 0;
+      const holdingPercentage = bundle.holding_percentage || 0;
+      
+      // Calculate what percentage of this bundle's tokens are still held
+      // If token_percentage is 0, avoid division by zero
+      const holdingRatio = totalTokenPercentage > 0 ? 
+                          (holdingPercentage / totalTokenPercentage * 100) : 0;
+      
+      // Get colors based on wallet type
+      const colors = getWalletTypeColors(primaryCategory);
+      
+      // Add wallet category specific styling
+      const walletTypeClass = `trenchbot-wallet-${primaryCategory.replace(/\s+/g, '_')}`;
+      bubble.classList.add(walletTypeClass);
+      
+      // Apply pie chart effect using conic gradient with wallet-specific colors
+      if (holdingRatio <= 0) {
+        // All sold - color by wallet type
+        bubble.style.background = colors.sold;
+        bubble.style.border = `2px solid ${colors.soldStroke}`;
+      } else if (holdingRatio >= 100) {
+        // All holding - color by wallet type
+        bubble.style.background = colors.holding;
+        bubble.style.border = `2px solid ${colors.holdingStroke}`;
+      } else {
+        // Mixed - create pie effect with conic-gradient using wallet-specific colors
+        bubble.style.background = `conic-gradient(
+          ${colors.holding} 0% ${holdingRatio}%, 
+          ${colors.sold} ${holdingRatio}% 100%
+        )`;
+        bubble.style.border = `2px solid ${colors.holdingStroke}`;
+      }
+      
+      // Staggered appearance animation
+      bubble.style.animationDelay = `${index * 30}ms`;
+      
+      // Add content
+      bubble.innerHTML = `
+        <div class="trenchbot-bubble-content">
+          <div class="trenchbot-bubble-icon">${emoji}</div>
+          <div class="trenchbot-bubble-percentage">${bundle.token_percentage.toFixed(2)}%</div>
+        </div>
+      `;
+      
+      // Add click handler
+      bubble.addEventListener('click', () => {
+        showBundleDetails(bundle);
+      });
+      
+      // Add to grid
+      grid.appendChild(bubble);
+    });
   }
   
-  // Create bubbles with physics properties
-  const bubbles = [];
-  
-  // Create DOM elements for bubbles
-  filteredBundles.forEach((bundle, index) => {
-    // Create the bubble element
-    const bubble = document.createElement('div');
-    bubble.className = 'trenchbot-bubble';
-    bubble.setAttribute('data-bundle-id', bundle.id);
+  function createD3Visualization(container, bundles) {
+    // Clear the container
+    container.innerHTML = '';
     
-    // Size based on percentage (scaled for visibility)
-    const size = calculateBubbleSize(bundle.token_percentage);
-    bubble.style.width = `${size}px`;
-    bubble.style.height = `${size}px`;
+    // Create tooltip element
+    const tooltip = document.createElement('div');
+    tooltip.className = 'trenchbot-tooltip';
+    container.appendChild(tooltip);
     
-    // Position randomly initially
-    const containerRect = container.getBoundingClientRect();
-    const maxX = containerRect.width - size;
-    const maxY = containerRect.height - size;
-    const x = Math.random() * maxX;
-    const y = Math.random() * maxY;
-    
-    bubble.style.left = `${x}px`;
-    bubble.style.top = `${y}px`;
-    
-    // Color based on holding status
-    if (bundle.holding_amount > 0) {
-      bubble.classList.add('trenchbot-holding');
-    } else {
-      bubble.classList.add('trenchbot-sold');
+    // Stop any existing simulation
+    if (currentVisualization && currentVisualization.simulation) {
+      currentVisualization.simulation.stop();
     }
     
-    // Get the primary wallet category for this bundle
+    // Set up dimensions
+    const containerRect = container.getBoundingClientRect();
+    const width = containerRect.width;
+    const height = containerRect.height;
+    
+    // Prepare nodes with sizing
+    const nodes = bundles.map((bundle, i) => {
+      // Calculate radius based on percentage
+      const radius = calculateBubbleSize(bundle.token_percentage) / 2;
+      
+      return {
+        index: i,
+        ...bundle,
+        radius: radius,
+        x: Math.random() * (width - 2 * radius) + radius,  // Random initial position
+        y: Math.random() * (height - 2 * radius) + radius,
+        // Store category and holding status for visuals
+        isHolding: bundle.holding_amount > 0,
+        primaryCategory: getPrimaryCategory(bundle),
+        // Add dragging property to track dragging state for each node
+        isDragging: false
+      };
+    });
+    
+    // Create SVG container
+    const svg = d3Instance.select(container)
+      .append('svg')
+      .attr('width', width)
+      .attr('height', height)
+      .attr('class', 'trenchbot-d3-svg')
+      .attr('viewBox', [0, 0, width, height]);
+    
+    // Use the EXACT ORIGINAL force simulation from the working code
+    const simulation = d3Instance.forceSimulation(nodes)
+      .force("x", d3Instance.forceX(width/2).strength(0.02))
+      .force("y", d3Instance.forceY(height/2).strength(0.02))
+      .force("collision", d3Instance.forceCollide().radius(d => d.radius + 2).strength(1))
+      .alpha(1)             // start hot so nodes settle into packed shape
+      .alphaDecay(0.02)     // slow decay so simulation stays alive
+      .alphaMin(0.001)
+      .velocityDecay(0.4)
+      .on('tick', ticked);
+    
+    // Create groups for each node
+    const bubbleGroups = svg.selectAll('.bubble-group')
+      .data(nodes)
+      .enter()
+      .append('g')
+      .attr('class', 'trenchbot-bubble-group')
+      .style('opacity', 0)  // Start invisible for animation
+      .each(function(d, i) {
+        // Animate entry with delay based on index
+        d3Instance.select(this)
+          .transition()
+          .delay(i * 30)  // Staggered delay
+          .duration(500)
+          .style('opacity', 1);
+      });
+    
+    // Add circles using arc paths to create pie charts
+    bubbleGroups.each(function(d) {
+      const group = d3Instance.select(this);
+      
+      // Calculate the ratio of holding to total tokens for this bundle
+      const totalTokenPercentage = d.token_percentage || 0;
+      const holdingPercentage = d.holding_percentage || 0;
+      
+      // Calculate what percentage of this bundle's tokens are still held
+      // If token_percentage is 0, avoid division by zero
+      const holdingRatio = totalTokenPercentage > 0 ? 
+                        (holdingPercentage / totalTokenPercentage * 100) : 0;
+      
+      // Get colors based on wallet type
+      const walletType = d.primaryCategory;
+      let fillColors = getWalletTypeColors(walletType);
+      
+      // Create arc generator
+      const arc = d3Instance.arc()
+        .innerRadius(0)
+        .outerRadius(d.radius);
+      
+      // Calculate angles for holding and sold portions
+      const holdingAngle = 2 * Math.PI * (holdingRatio / 100);
+      const soldAngle = 2 * Math.PI - holdingAngle;
+      
+      if (holdingRatio <= 0) {
+        // Sold bubbles - more visible but clearly distinct from holding bubbles
+        group.append('circle')
+          .attr('r', d.radius)
+          .attr('fill', 'rgba(120, 120, 140, 0.6)') // Light gray with good visibility
+          .attr('stroke', fillColors.soldStroke)  // Add the stroke explicitly
+          .attr('stroke-width', 1)
+          .attr('class', `trenchbot-d3-circle trenchbot-sold trenchbot-wallet-${d.primaryCategory.replace(/\s+/g, '_')}`);
+      }
+      else if (holdingRatio >= 100) {
+        // All holding - color by wallet type
+        group.append('circle')
+          .attr('r', d.radius)
+          .attr('fill', fillColors.holding)
+          .attr('stroke', fillColors.holdingStroke)
+          .attr('filter', 'url(#glow)')
+          .attr('stroke-width', 3)
+          .attr('class', `trenchbot-d3-circle trenchbot-wallet-${d.primaryCategory.replace(/\s+/g, '_')}`);
+      }
+      else {
+        // Partial holding - create pie chart with two arcs
+        
+        // Add holding segment (colored by wallet type)
+        group.append('path')
+          .attr('d', arc({
+            startAngle: 0,
+            endAngle: holdingAngle
+          }))
+          .attr('fill', fillColors.holding)
+          .attr('stroke', fillColors.holdingStroke)
+          .attr('stroke-width', 3)
+          .attr('class', `trenchbot-d3-circle trenchbot-wallet-${d.primaryCategory.replace(/\s+/g, '_')}`);
+        
+        // Add sold segment (gray with tint of wallet color)
+        group.append('path')
+          .attr('d', arc({
+            startAngle: holdingAngle,
+            endAngle: 2 * Math.PI
+          }))
+          .attr('fill', fillColors.sold)
+          .attr('stroke', fillColors.soldStroke)
+          .attr('stroke-width', 3)
+          .attr('class', `trenchbot-d3-circle trenchbot-wallet-${d.primaryCategory.replace(/\s+/g, '_')}`);
+      }
+    });
+    
+    // Add wallet type emoji
+    bubbleGroups.append('text')
+      .attr('class', 'trenchbot-d3-icon')
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('dy', -5)
+      .text(d => WALLET_ICONS[d.primaryCategory] || WALLET_ICONS.regular);
+    
+    // Add percentage text
+    bubbleGroups.append('text')
+      .attr('class', 'trenchbot-d3-percentage')
+      .attr('text-anchor', 'middle')
+      .attr('dominant-baseline', 'central')
+      .attr('dy', 10)
+      .text(d => `${d.token_percentage.toFixed(2)}%`);
+    
+    // Set up tooltip behavior with delay - EXACTLY as before
+    let tooltipTimeout;
+    
+    // Add event listeners for hover - ORIGINAL implementation
+    bubbleGroups.on('mouseover', function(event, d) {
+      // Clear any existing timeout
+      if (tooltipTimeout) clearTimeout(tooltipTimeout);
+      
+      // Set a timeout before showing tooltip - 2+ seconds
+      tooltipTimeout = setTimeout(() => {
+        tooltip.style.display = 'block';
+        tooltip.style.opacity = '1';
+        
+        // Create tooltip content
+        tooltip.innerHTML = `
+          <div class="trenchbot-tooltip-content">
+            <div class="trenchbot-tooltip-header">Bundle Info</div>
+            <div class="trenchbot-tooltip-row">
+              <span class="trenchbot-tooltip-label">Token %:</span>
+              <span class="trenchbot-tooltip-value">${d.token_percentage.toFixed(2)}%</span>
+            </div>
+            <div class="trenchbot-tooltip-row">
+              <span class="trenchbot-tooltip-label">Holding %:</span>
+              <span class="trenchbot-tooltip-value">${d.holding_percentage ? d.holding_percentage.toFixed(2) : '0.00'}%</span>
+            </div>
+            <div class="trenchbot-tooltip-row">
+              <span class="trenchbot-tooltip-label">SOL:</span>
+              <span class="trenchbot-tooltip-value">${d.total_sol ? d.total_sol.toFixed(2) : '0.00'}</span>
+            </div>
+            <div class="trenchbot-tooltip-row">
+              <span class="trenchbot-tooltip-label">Wallets:</span>
+              <span class="trenchbot-tooltip-value">${d.unique_wallets || 0}</span>
+            </div>
+            <div class="trenchbot-tooltip-row">
+              <span class="trenchbot-tooltip-label">Type:</span>
+              <span class="trenchbot-tooltip-value">${d.primaryCategory.replace(/_/g, ' ')}</span>
+            </div>
+          </div>
+        `;
+        
+        // Position tooltip near the mouse but within viewport
+        const mouseX = event.pageX;
+        const mouseY = event.pageY;
+        const tooltipRect = tooltip.getBoundingClientRect();
+        
+        // Ensure tooltip stays within viewport
+        const posX = Math.min(mouseX + 10, window.innerWidth - tooltipRect.width - 10);
+        const posY = Math.min(mouseY + 10, window.innerHeight - tooltipRect.height - 10);
+        
+        tooltip.style.left = `${posX}px`;
+        tooltip.style.top = `${posY}px`;
+        
+        // Highlight the current bubble
+        d3Instance.select(this).selectAll('.trenchbot-d3-circle')
+          .attr('stroke-width', 3)
+          .attr('stroke', '#fff');
+      }, 2000); // 2 second delay before showing tooltip - as in original
+    })
+    .on('mousemove', function(event) {
+      if (tooltip.style.display === 'block') {
+        // Update tooltip position
+        const mouseX = event.pageX;
+        const mouseY = event.pageY;
+        const tooltipRect = tooltip.getBoundingClientRect();
+        
+        const posX = Math.min(mouseX + 10, window.innerWidth - tooltipRect.width - 10);
+        const posY = Math.min(mouseY + 10, window.innerHeight - tooltipRect.height - 10);
+        
+        tooltip.style.left = `${posX}px`;
+        tooltip.style.top = `${posY}px`;
+      }
+    })
+    .on('mouseout', function(event, d) {
+      // Clear the timeout if we move out before it triggers
+      if (tooltipTimeout) {
+        clearTimeout(tooltipTimeout);
+      }
+      
+      // Hide tooltip
+      tooltip.style.opacity = '0';
+      setTimeout(() => {
+        tooltip.style.display = 'none';
+      }, 200);
+      
+      // Reset bubble appearance - with the colors based on wallet type
+      const colors = getWalletTypeColors(d.primaryCategory);
+      const isHolding = d.holding_amount > 0;
+      
+      d3Instance.select(this).selectAll('.trenchbot-d3-circle')
+        .attr('stroke-width', 2)
+        .attr('stroke', isHolding ? colors.holdingStroke : colors.soldStroke);
+    });
+    
+    // Add click handler separately from drag - EXACT original implementation
+    bubbleGroups.on('click', function(event, d) {
+      // Only show details if not dragging
+      if (!d.isDragging) {
+        showBundleDetails(d);
+      }
+      // Reset the dragging state
+      d.isDragging = false;
+    });
+    
+    // Set up drag behavior - EXACT original implementation
+    bubbleGroups.call(d3Instance.drag()
+      .on('start', function(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+        d.isDragging = false; // Initialize as not dragging
+        d3Instance.select(this).selectAll('.trenchbot-d3-circle').attr('stroke', '#fff');
+      })
+      .on('drag', function(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+        // If moved more than a small amount, consider it a drag
+        if (Math.abs(event.dx) > 3 || Math.abs(event.dy) > 3) {
+          d.isDragging = true;
+        }
+      })
+      .on('end', function(event, d) {
+        // Get distance from center
+        const centerX = width/2;
+        const centerY = height/2;
+        const dx = d.x - centerX;
+        const dy = d.y - centerY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Heat up the simulation based on distance
+        // The further we dragged, the more energy we inject
+        simulation.alpha(Math.min(0.5, Math.max(0.1, distance / 300)));
+        
+        // Release fixed positions
+        d.fx = null;
+        d.fy = null;
+        
+        // Reset stroke - with wallet type colors
+        const colors = getWalletTypeColors(d.primaryCategory);
+        const isHolding = d.holding_amount > 0;
+        
+        d3Instance.select(this).selectAll('.trenchbot-d3-circle')
+          .attr('stroke-width', 2)
+          .attr('stroke', isHolding ? colors.holdingStroke : colors.soldStroke);
+      })
+    );
+    
+    // ORIGINAL Tick function
+    function ticked() {
+      nodes.forEach(function(d) {
+        // Limit x position to stay within bounds (with some padding for the radius)
+        d.x = Math.max(d.radius + 5, Math.min(width - d.radius - 5, d.x));
+        // Limit y position to stay within bounds (with some padding for the radius)
+        d.y = Math.max(d.radius + 5, Math.min(height - d.radius - 5, d.y));
+      });
+      // Update groups position
+      bubbleGroups.attr('transform', d => `translate(${d.x},${d.y})`);
+    }
+    
+    // Store visualization data for cleanup
+    currentVisualization = {
+      simulation,
+      svg,
+      nodes
+    };
+  }
+
+  function showBundleDetails(bundle) {
+    console.log('Showing bundle details for:', bundle);
+    
+    // Remove any existing details panel
+    const existingPanel = document.getElementById('trenchbot-bundle-details');
+    if (existingPanel) {
+      existingPanel.remove();
+    }
+    
+    // Create the details panel
+    const detailsPanel = document.createElement('div');
+    detailsPanel.id = 'trenchbot-bundle-details';
+    detailsPanel.className = 'trenchbot-bundle-details-panel';
+    
+    // Calculate what percentage of this bundle's tokens are still held
+    const totalTokenPercentage = bundle.token_percentage || 0;
+    const holdingPercentage = bundle.holding_percentage || 0;
+    const holdingRatio = totalTokenPercentage > 0 ? 
+                      (holdingPercentage / totalTokenPercentage * 100) : 0;
+    
+    // Format numbers
+    const formattedTotalPercentage = totalTokenPercentage.toFixed(2);
+    const formattedHoldingPercentage = holdingPercentage.toFixed(2);
+    const formattedSolSpent = bundle.total_sol ? bundle.total_sol.toFixed(2) : '0.00';
+    const totalWallets = bundle.unique_wallets || 0;
+    
+    // Get wallet type and corresponding colors
+    const primaryCategory = getPrimaryCategory(bundle);
+    const categoryIcon = getCategoryEmoji(primaryCategory);
+    const walletColors = getWalletTypeColors(primaryCategory);
+    
+    // Generate the panel content with a futuristic UI design
+    detailsPanel.innerHTML = `
+      <div class="trenchbot-details-header">
+        <h3>
+          <span class="trenchbot-details-icon" style="background: ${walletColors.holding}">
+            ${categoryIcon}
+          </span>
+          Bundle Details
+          <span class="trenchbot-details-percentage">${formattedTotalPercentage}%</span>
+        </h3>
+        <button id="trenchbot-details-close" class="trenchbot-details-close-btn">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      
+      <div class="trenchbot-details-content">
+        <div class="trenchbot-details-section">
+          <h4>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            Overview
+          </h4>
+          
+          <div class="trenchbot-detail-row">
+            <span>Bundle Type</span>
+            <span class="trenchbot-wallet-${primaryCategory}">
+              ${categoryIcon} ${primaryCategory.replace(/_/g, ' ')}
+            </span>
+          </div>
+          
+          <div class="trenchbot-detail-row">
+            <span>Token Percentage</span>
+            <span>${formattedTotalPercentage}%</span>
+          </div>
+          
+          <div class="trenchbot-detail-row">
+            <span>Holding Percentage</span>
+            <span class="${holdingRatio > 50 ? 'trenchbot-value-high' : 'trenchbot-value-low'}">
+              ${formattedHoldingPercentage}% (${holdingRatio.toFixed(0)}% of bundle)
+            </span>
+          </div>
+          
+          <div class="trenchbot-detail-row">
+            <span>SOL Spent</span>
+            <span>${formattedSolSpent} SOL</span>
+          </div>
+          
+          <div class="trenchbot-detail-row">
+            <span>Unique Wallets</span>
+            <span>${totalWallets}</span>
+          </div>
+        </div>
+        
+        <div class="trenchbot-details-section">
+          <h4>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+              <circle cx="9" cy="7" r="4"></circle>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+            </svg>
+            Wallets
+          </h4>
+          
+          <div class="trenchbot-wallets-list">
+            ${generateWalletsList(bundle)}
+          </div>
+        </div>
+      </div>
+    `;
+    
+    // Add the panel to the bubble map
+    const bubbleMap = document.getElementById('trenchbot-bubble-map');
+    bubbleMap.appendChild(detailsPanel);
+    
+    // Set up event listener for close button
+    const closeButton = detailsPanel.querySelector('#trenchbot-details-close');
+    closeButton.addEventListener('click', () => {
+      detailsPanel.remove();
+    });
+    
+    // Apply entrance animation
+    setTimeout(() => {
+      detailsPanel.classList.add('active');
+    }, 10);
+  }
+
+  function generateWalletsList(bundle) {
+      // If no wallets data, show message
+      if (!bundle.wallet_info || Object.keys(bundle.wallet_info).length === 0) {
+        return `<div class="trenchbot-no-data">No wallet data available</div>`;
+      }
+      
+      // Get colors for the wallet category
+      const walletColors = getWalletTypeColors(getPrimaryCategory(bundle));
+      
+      // Generate wallet list HTML
+      let walletsHtml = '';
+      
+      // Sort wallets by token amount (if available)
+      const sortedWallets = Object.entries(bundle.wallet_info)
+        .sort((a, b) => {
+          const aAmount = a[1].tokens || 0;
+          const bAmount = b[1].tokens || 0;
+          return bAmount - aAmount;
+        })
+        .slice(0, 10); // Limit to top 10 wallets for performance
+        
+      sortedWallets.forEach(([address, data]) => {
+        // Format wallet data
+        const tokenAmount = data.tokens ? (data.tokens / 1e9).toFixed(2) : '0.00';
+        const percentage = data.token_percentage ? data.token_percentage.toFixed(2) : '0.00';
+        
+        // Get wallet category from wallet_categories if available
+        const category = bundle.wallet_categories && bundle.wallet_categories[address] 
+                      ? bundle.wallet_categories[address] 
+                      : 'regular';
+        
+        const categoryIcon = getCategoryEmoji(category);
+        const holdingStatus = bundle.holding_amount && data.tokens > 0 ? 'Holding' : 'Sold';
+        const holdingClass = holdingStatus === 'Holding' ? 'trenchbot-holding-status' : 'trenchbot-sold-status';
+        
+        // Generate wallet item with hover effects and clickable address
+        walletsHtml += `
+          <div class="trenchbot-wallet-item">
+            <div class="trenchbot-wallet-info">
+              <a href="https://solscan.io/account/${address}" 
+                target="_blank" 
+                class="trenchbot-wallet-address"
+                title="View on Solscan">
+                ${address.substring(0, 6)}...${address.substring(address.length - 4)}
+                <svg class="trenchbot-external-link" xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+              </a>
+              <span class="trenchbot-wallet-category ${category}">
+                ${categoryIcon} ${category.replace(/_/g, ' ')}
+              </span>
+            </div>
+            <div class="trenchbot-wallet-stats">
+              <div class="trenchbot-wallet-stat">
+                <span class="trenchbot-wallet-stat-label">Tokens:</span>
+                <span class="trenchbot-wallet-stat-value">${tokenAmount}</span>
+              </div>
+              <div class="trenchbot-wallet-stat">
+                <span class="trenchbot-wallet-stat-label">%:</span>
+                <span class="trenchbot-wallet-stat-value">${percentage}%</span>
+              </div>
+              <div class="trenchbot-wallet-stat ${holdingClass}">
+                <span class="trenchbot-wallet-stat-label">Status:</span>
+                <span class="trenchbot-wallet-stat-value">${holdingStatus}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      
+      // If there are more wallets than what we displayed
+      const remainingWallets = Object.keys(bundle.wallet_info).length - sortedWallets.length;
+      if (remainingWallets > 0) {
+        walletsHtml += `
+          <div class="trenchbot-wallets-more">
+            +${remainingWallets} more wallets not shown
+          </div>
+        `;
+      }
+      
+      return walletsHtml;
+  }
+
+  function makeElementDraggable(element, handleSelector = null) {
+    if (!element) return;
+    
+    const handle = handleSelector ? element.querySelector(handleSelector) : element;
+    if (!handle) return;
+    
+    let isDragging = false;
+    let startX, startY, startLeft, startTop;
+    
+    handle.style.cursor = 'move';
+    
+    // Simple, reliable drag implementation
+    handle.addEventListener('mousedown', function(e) {
+      // Don't start drag if clicking on buttons
+      if (e.target.tagName === 'BUTTON' || e.target.closest('button')) {
+        return;
+      }
+      
+      e.preventDefault();
+      
+      // Get the initial position
+      startX = e.clientX;
+      startY = e.clientY;
+      
+      const computedStyle = window.getComputedStyle(element);
+      startLeft = parseInt(computedStyle.left, 10) || 0;
+      startTop = parseInt(computedStyle.top, 10) || 0;
+      
+      isDragging = true;
+      
+      // Add document-wide handlers
+      document.addEventListener('mousemove', onMouseMove);
+      document.addEventListener('mouseup', onMouseUp);
+    });
+    
+    function onMouseMove(e) {
+      if (!isDragging) return;
+      
+      // Simple position calculation
+      const newLeft = startLeft + (e.clientX - startX);
+      const newTop = startTop + (e.clientY - startY);
+      
+      // Direct position update - no transforms or fancy effects
+      element.style.left = newLeft + 'px';
+      element.style.top = newTop + 'px';
+    }
+    
+    function onMouseUp() {
+      isDragging = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
+  }
+
+  function getPrimaryCategory(bundle) {
     let primaryCategory = 'regular';
     if (bundle.bundle_analysis && bundle.bundle_analysis.primary_category) {
       primaryCategory = bundle.bundle_analysis.primary_category;
@@ -640,974 +1484,77 @@ function setupPhysicsSimulation(container, bundles, showOnlyHolding, selectedTyp
         primaryCategory = categories[0];
       }
     }
-    
-    // Set category-specific emoji
-    let icon = '👤'; // Default
-    switch (primaryCategory) {
-      case 'sniper':
-        icon = '🔫';
-        break;
+    return primaryCategory;
+  }
+  
+  function getCategoryEmoji(category) {
+    return WALLET_ICONS[category] || WALLET_ICONS.regular;
+  }
+  
+  // New function for getting colors based on wallet type
+  function getWalletTypeColors(walletType) {
+    switch(walletType) {
       case 'regular':
-        icon = '👤';
-        break;
+        return {
+          holding: 'rgba(79, 124, 255, 0.7)', // Blue
+          holdingStroke: 'rgba(79, 124, 255, 0.9)',
+          sold: 'rgba(79, 124, 255, 0.3)',
+          soldStroke: 'rgba(79, 124, 255, 0.5)'
+        };
+      case 'sniper':
+        return {
+          holding: 'rgba(255, 151, 79, 0.7)', // Orange
+          holdingStroke: 'rgba(255, 151, 79, 0.9)',
+          sold: 'rgba(255, 151, 79, 0.3)',
+          soldStroke: 'rgba(255, 151, 79, 0.5)'
+        };
       case 'new_wallet':
-        icon = '🆕';
-        break;
-      case 'copy_trader':
-        icon = '🔄';
-        break;
+        return {
+          holding: 'rgba(56, 239, 125, 0.7)', // Green
+          holdingStroke: 'rgba(56, 239, 125, 0.9)',
+          sold: 'rgba(56, 239, 125, 0.3)',
+          soldStroke: 'rgba(56, 239, 125, 0.5)'
+        };
       case 'team_bundle':
-        icon = '👨‍💻';
-        break;
-    }
-    
-    // Add content to the bubble
-    bubble.innerHTML = `
-      <div class="trenchbot-bubble-content">
-        <div class="trenchbot-bubble-icon">${icon}</div>
-        <div class="trenchbot-bubble-percentage">${bundle.token_percentage.toFixed(2)}%</div>
-      </div>
-    `;
-    
-    // Create tooltip content
-    const tooltipContent = `
-      <div class="trenchbot-tooltip-content">
-        <div class="trenchbot-tooltip-header">Bundle Info</div>
-        <div class="trenchbot-tooltip-row">
-          <span class="trenchbot-tooltip-label">Token %:</span>
-          <span class="trenchbot-tooltip-value">${bundle.token_percentage.toFixed(2)}%</span>
-        </div>
-        <div class="trenchbot-tooltip-row">
-          <span class="trenchbot-tooltip-label">Holding %:</span>
-          <span class="trenchbot-tooltip-value">${bundle.holding_percentage ? bundle.holding_percentage.toFixed(2) : '0.00'}%</span>
-        </div>
-        <div class="trenchbot-tooltip-row">
-          <span class="trenchbot-tooltip-label">SOL:</span>
-          <span class="trenchbot-tooltip-value">${bundle.total_sol ? bundle.total_sol.toFixed(2) : '0.00'}</span>
-        </div>
-        <div class="trenchbot-tooltip-row">
-          <span class="trenchbot-tooltip-label">Wallets:</span>
-          <span class="trenchbot-tooltip-value">${bundle.unique_wallets || 0}</span>
-        </div>
-        <div class="trenchbot-tooltip-row">
-          <span class="trenchbot-tooltip-label">Type:</span>
-          <span class="trenchbot-tooltip-value">${primaryCategory.replace(/_/g, ' ')}</span>
-        </div>
-      </div>
-    `;
-    
-    // Add tooltip element
-    const tooltip = document.createElement('div');
-    tooltip.className = 'trenchbot-bubble-tooltip';
-    tooltip.innerHTML = tooltipContent;
-    bubble.appendChild(tooltip);
-    
-    // Add physics properties
-    const physics = {
-      x,
-      y,
-      vx: (Math.random() - 0.5) * 0.5, // Random initial velocity
-      vy: (Math.random() - 0.5) * 0.5,
-      radius: size / 2,
-      element: bubble,
-      bundle
-    };
-    
-    bubbles.push(physics);
-    
-    // Add animation delay for staggered appearance
-    bubble.style.animationDelay = `${index * 30}ms`;
-    
-    // Add the bubble to the container
-    container.appendChild(bubble);
-    
-    // Add event listeners
-    bubble.addEventListener('mouseover', () => {
-      tooltip.style.display = 'block';
-      bubble.classList.add('trenchbot-bubble-hover');
-    });
-    
-    bubble.addEventListener('mouseout', () => {
-      tooltip.style.display = 'none';
-      bubble.classList.remove('trenchbot-bubble-hover');
-    });
-    
-    bubble.addEventListener('click', () => {
-      showBundleDetails(bundle);
-    });
-    
-    // Make bubbles draggable
-    makeBubbleDraggable(bubble, physics);
-  });
-  
-  // Run the physics simulation
-  let animationFrame;
-  const update = () => {
-    // Update positions
-    bubbles.forEach(bubble => {
-      if (bubble.dragging) return; // Skip physics for bubbles being dragged
-      
-      // Apply forces and update position
-      bubble.x += bubble.vx;
-      bubble.y += bubble.vy;
-      
-      // Dampen velocity (friction)
-      bubble.vx *= 0.99;
-      bubble.vy *= 0.99;
-      
-      // Container bounds
-      const containerRect = container.getBoundingClientRect();
-      if (bubble.x - bubble.radius < 0) {
-        bubble.x = bubble.radius;
-        bubble.vx *= -0.7; // Bounce and lose energy
-      } else if (bubble.x + bubble.radius > containerRect.width) {
-        bubble.x = containerRect.width - bubble.radius;
-        bubble.vx *= -0.7;
-      }
-      
-      if (bubble.y - bubble.radius < 0) {
-        bubble.y = bubble.radius;
-        bubble.vy *= -0.7;
-      } else if (bubble.y + bubble.radius > containerRect.height) {
-        bubble.y = containerRect.height - bubble.radius;
-        bubble.vy *= -0.7;
-      }
-      
-      // Apply the position to the DOM element
-      bubble.element.style.left = `${bubble.x - bubble.radius}px`;
-      bubble.element.style.top = `${bubble.y - bubble.radius}px`;
-    });
-    
-    // Handle collisions between bubbles
-    for (let i = 0; i < bubbles.length; i++) {
-      for (let j = i + 1; j < bubbles.length; j++) {
-        const b1 = bubbles[i];
-        const b2 = bubbles[j];
-        
-        // Skip if either bubble is being dragged
-        if (b1.dragging || b2.dragging) continue;
-        
-        const dx = b1.x - b2.x;
-        const dy = b1.y - b2.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        const minDistance = b1.radius + b2.radius;
-        
-        // If bubbles are overlapping, apply repulsion
-        if (distance < minDistance) {
-          const angle = Math.atan2(dy, dx);
-          const overlap = minDistance - distance;
-          
-          // Normalized overlap vector
-          const moveX = Math.cos(angle) * overlap * 0.5;
-          const moveY = Math.sin(angle) * overlap * 0.5;
-          
-          // Move bubbles apart slightly based on their relative sizes
-          const m1 = b1.radius * b1.radius;
-          const m2 = b2.radius * b2.radius;
-          const totalMass = m1 + m2;
-          
-          // Move proportionally to mass (bigger bubbles move less)
-          if (!b1.dragging) {
-            b1.x += moveX * (m2 / totalMass);
-            b1.y += moveY * (m2 / totalMass);
-          }
-          
-          if (!b2.dragging) {
-            b2.x -= moveX * (m1 / totalMass);
-            b2.y -= moveY * (m1 / totalMass);
-          }
-          
-          // Add a bit of energy to the system
-          const forceFactor = 0.05;
-          b1.vx += forceFactor * moveX * (m2 / totalMass);
-          b1.vy += forceFactor * moveY * (m2 / totalMass);
-          b2.vx -= forceFactor * moveX * (m1 / totalMass);
-          b2.vy -= forceFactor * moveY * (m1 / totalMass);
-        }
-      }
-    }
-    
-    // Continue the animation loop
-    animationFrame = requestAnimationFrame(update);
-  };
-  
-  // Start the animation
-  update();
-  
-  // Stop the physics when the bubble map is closed
-  const bubbleMap = document.getElementById('trenchbot-bubble-map');
-  if (bubbleMap) {
-    const closeButton = bubbleMap.querySelector('#bubble-map-close');
-    if (closeButton) {
-      const originalHandler = closeButton.onclick;
-      closeButton.onclick = (e) => {
-        e.stopPropagation();
-        cancelAnimationFrame(animationFrame);
-        if (originalHandler) originalHandler();
-      };
+        return {
+          holding: 'rgba(255, 79, 106, 0.7)', // Red
+          holdingStroke: 'rgba(255, 79, 106, 0.9)',
+          sold: 'rgba(255, 79, 106, 0.3)',
+          soldStroke: 'rgba(255, 79, 106, 0.5)'
+        };
+      case 'copy_trader':
+        return {
+          holding: 'rgba(106, 69, 255, 0.7)', // Purple
+          holdingStroke: 'rgba(106, 69, 255, 0.9)',
+          sold: 'rgba(106, 69, 255, 0.3)',
+          soldStroke: 'rgba(106, 69, 255, 0.5)'
+        };
+      default:
+        return {
+          holding: 'rgba(79, 124, 255, 0.7)', // Default Blue
+          holdingStroke: 'rgba(79, 124, 255, 0.9)',
+          sold: 'rgba(79, 124, 255, 0.3)',
+          soldStroke: 'rgba(79, 124, 255, 0.5)'
+        };
     }
   }
-  
-  // Also stop on window unload
-  window.addEventListener('beforeunload', () => {
-    cancelAnimationFrame(animationFrame);
-  });
-}
 
-// Make a bubble draggable
-function makeBubbleDraggable(bubble, physics) {
-  let isDragging = false;
-  let offsetX, offsetY;
-  
-  bubble.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    isDragging = true;
-    physics.dragging = true;
-    
-    // Calculate offset from bubble center
-    const rect = bubble.getBoundingClientRect();
-    offsetX = e.clientX - (rect.left + rect.width / 2);
-    offsetY = e.clientY - (rect.top + rect.height / 2);
-    
-    // Bring to front
-    bubble.style.zIndex = '10';
-    
-    const onMouseMove = (e) => {
-      if (isDragging) {
-        const containerRect = bubble.parentElement.getBoundingClientRect();
-        const parentRect = bubble.parentElement.getBoundingClientRect();
-        
-        // Calculate position relative to container, accounting for scroll
-        const x = e.clientX - parentRect.left - offsetX;
-        const y = e.clientY - parentRect.top - offsetY;
-        
-        // Ensure the bubble stays within the container
-        const radius = physics.radius;
-        const boundedX = Math.max(radius, Math.min(x, containerRect.width - radius));
-        const boundedY = Math.max(radius, Math.min(y, containerRect.height - radius));
-        
-        // Update physics position
-        physics.x = boundedX;
-        physics.y = boundedY;
-        
-        // Update DOM position
-        bubble.style.left = `${boundedX - radius}px`;
-        bubble.style.top = `${boundedY - radius}px`;
-      }
-    };
-    
-    const onMouseUp = () => {
-      isDragging = false;
-      physics.dragging = false;
-      bubble.style.zIndex = '';
-      
-      // Reset velocity after drag ends
-      physics.vx = 0;
-      physics.vy = 0;
-      
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-    };
-    
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  });
-}
+  function calculateBubbleSize(percentage) {
+    const minSize = 20; // px
+    const maxSize = 160; // px
+    const maxPct  = 20;  // pct at which bubble reaches maxSize
 
-// Calculate bubble size based on percentage
-function calculateBubbleSize(percentage) {
-  // Min size: 40px, Max size: 140px
-  // Scale the size logarithmically for better visibility of smaller bubbles
-  const minSize = 40;
-  const maxSize = 140;
-  
-  if (percentage <= 0) return minSize;
-  
-  // Logarithmic scale to make smaller bubbles more visible
-  const logValue = Math.log(percentage + 1) / Math.log(100);
-  return minSize + (maxSize - minSize) * logValue;
-}
+    if (percentage <= 0) return minSize;
 
-// Show detailed information about a specific bundle
-function showBundleDetails(bundle) {
-  // Remove existing details panel if any
-  const existingPanel = document.getElementById('trenchbot-bundle-details-panel');
-  if (existingPanel) {
-    existingPanel.remove();
+    // Compute circle areas for min and max radii
+    const minArea = Math.PI * minSize * minSize;
+    const maxArea = Math.PI * maxSize * maxSize;
+
+    // Interpolate area linearly by percentage
+    const area = minArea + (maxArea - minArea) * Math.min(1, percentage / maxPct);
+
+    // Back to radius
+    return Math.sqrt(area / Math.PI);
   }
-  
-  // Create details panel
-  const detailsPanel = document.createElement('div');
-  detailsPanel.id = 'trenchbot-bundle-details-panel';
-  detailsPanel.className = 'trenchbot-bundle-details-panel';
-  
-  // Get bundle wallet categories
-  let walletCategories = {};
-  if (bundle.bundle_analysis && bundle.bundle_analysis.category_breakdown) {
-    walletCategories = bundle.bundle_analysis.category_breakdown;
-  }
-  
-  // Prepare wallet categories breakdown
-  const categoryList = Object.entries(walletCategories)
-    .map(([category, count]) => `<div class="trenchbot-detail-row"><span>${category.replace(/_/g, ' ')}</span><span>${count}</span></div>`)
-    .join('');
-  
-  // Prepare wallet list
-  const walletList = Object.entries(bundle.wallet_info || {})
-    .map(([wallet, info]) => {
-      const shortWallet = wallet.substring(0, 6) + '...' + wallet.substring(wallet.length - 4);
-      return `
-        <div class="trenchbot-wallet-item">
-          <div class="trenchbot-wallet-address" title="${wallet}">${shortWallet}</div>
-          <div class="trenchbot-wallet-stats">
-            <span>${info.sol_percentage ? info.sol_percentage.toFixed(1) : '0.0'}% SOL</span>
-            <span>${info.token_percentage ? info.token_percentage.toFixed(1) : '0.0'}% Token</span>
-          </div>
-        </div>
-      `;
-    })
-    .join('');
-  
-  // Build the panel content
-  detailsPanel.innerHTML = `
-    <div class="trenchbot-details-header">
-      <h3>Bundle Details (${bundle.unique_wallets || 0} wallets)</h3>
-      <button id="trenchbot-close-details" class="trenchbot-close-button">&times;</button>
-    </div>
-    <div class="trenchbot-details-content">
-      <div class="trenchbot-details-section">
-        <h4>Overview</h4>
-        <div class="trenchbot-detail-row">
-          <span>Token Percentage:</span>
-          <span>${bundle.token_percentage ? bundle.token_percentage.toFixed(2) : '0.00'}%</span>
-        </div>
-        <div class="trenchbot-detail-row">
-          <span>Holding Percentage:</span>
-          <span>${bundle.holding_percentage ? bundle.holding_percentage.toFixed(2) : '0.00'}%</span>
-        </div>
-        <div class="trenchbot-detail-row">
-          <span>Total SOL:</span>
-          <span>${bundle.total_sol ? bundle.total_sol.toFixed(2) : '0.00'} SOL</span>
-        </div>
-        <div class="trenchbot-detail-row">
-          <span>Holding Status:</span>
-          <span>${bundle.holding_amount > 0 ? 'Yes' : 'No'}</span>
-        </div>
-      </div>
-      
-      <div class="trenchbot-details-section">
-        <h4>Wallet Categories</h4>
-        <div class="trenchbot-category-list">
-          ${categoryList || '<div class="trenchbot-no-data">No category data available</div>'}
-        </div>
-      </div>
-      
-      <div class="trenchbot-details-section">
-        <h4>Wallets</h4>
-        <div class="trenchbot-wallets-list">
-          ${walletList || '<div class="trenchbot-no-data">No wallet data available</div>'}
-        </div>
-      </div>
-    </div>
-  `;
-  
-  // Add the panel to the bubble map
-  const bubbleMap = document.getElementById('trenchbot-bubble-map');
-  if (bubbleMap) {
-    bubbleMap.appendChild(detailsPanel);
-    
-    // Add close button event listener
-    const closeButton = document.getElementById('trenchbot-close-details');
-    if (closeButton) {
-      closeButton.addEventListener('click', () => {
-        detailsPanel.remove();
-      });
-    }
-    
-    // Make the panel draggable
-    makeOverlayDraggable(detailsPanel, '.trenchbot-details-header');
-  }
-}
 
-// Fix the makeOverlayDraggable function to better handle button clicks
-function makeOverlayDraggable(element, handleSelector = null) {
-  if (!element) return;
-  
-  let isDragging = false;
-  let startX, startY;
-  let hasMoved = false;
-  
-  // Find element to use as drag handle
-  const dragHandle = handleSelector ? element.querySelector(handleSelector) : element;
-  
-  if (!dragHandle) return;
-  
-  dragHandle.style.cursor = 'move';
-  
-  const onMouseDown = function(e) {
-    // CRITICAL FIX: Don't start drag if clicking on any button elements
-    if (e.target.tagName.toLowerCase() === 'button' || 
-        e.target.closest('button') !== null || 
-        e.target.id === 'trenchbot-close' || 
-        e.target.id === 'trenchbot-refresh' ||
-        e.target.id === 'trenchbot-more-info' ||
-        e.target.id === 'bubble-map-close') {
-      return;
-    }
-    
-    e.preventDefault();
-    isDragging = true;
-    hasMoved = false;
-    
-    // Get initial positions
-    startX = e.clientX;
-    startY = e.clientY;
-    
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  };
-  
-  const onMouseMove = function(e) {
-    if (!isDragging) return;
-    
-    e.preventDefault();
-    hasMoved = true;
-    
-    // Calculate new position - just using the difference in mouse position
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-    
-    // Update element position using current position + movement
-    element.style.left = (element.offsetLeft + dx) + 'px';
-    element.style.top = (element.offsetTop + dy) + 'px';
-    
-    // Update starting point for the next move
-    startX = e.clientX;
-    startY = e.clientY;
-  };
-  
-  const onMouseUp = function(e) {
-    if (isDragging) {
-      e.preventDefault();
-      e.stopPropagation();
-      
-      isDragging = false;
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
-      
-      // If we haven't moved, this might be a click - but we'll let the click handlers take care of it
-      if (!hasMoved) {
-        // This was just a click, not a drag operation
-        console.log('Click detected, not drag');
-      }
-    }
-  };
-  
-  dragHandle.addEventListener('mousedown', onMouseDown);
-}
-
-// Add styles for the overlay
-function addOverlayStyles() {
-  if (document.getElementById('trenchbot-overlay-styles')) return;
-  
-  const styles = document.createElement('style');
-  styles.id = 'trenchbot-overlay-styles';
-  styles.textContent = `
-    .trenchbot-overlay {
-      position: fixed;
-      z-index: 9999;
-      background-color: #121212;
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-      user-select: none;
-      transition: none;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      width: 220px;
-      cursor: move;
-    }
-    
-    .trenchbot-content {
-      padding: 10px;
-    }
-    
-    .trenchbot-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 5px;
-      font-size: 16px;
-      font-weight: 600;
-    }
-    
-    .trenchbot-percentage {
-      font-size: 15px;
-      font-weight: 700;
-    }
-    
-    .trenchbot-footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.7);
-    }
-    
-    .trenchbot-label {
-      font-size: 12px;
-    }
-    
-    .trenchbot-green {
-      color: #00e676;
-    }
-    
-    .trenchbot-red {
-      color: #ff4444;
-    }
-    
-    .trenchbot-yellow {
-      color: #ffaa00;
-    }
-    
-    .trenchbot-error {
-      color: #ff4444;
-    }
-    
-    .trenchbot-close-button {
-      position: absolute;
-      top: 5px;
-      right: 5px;
-      font-size: 18px;
-      color: rgba(255, 255, 255, 0.7);
-      background: none;
-      border: none;
-      cursor: pointer !important;
-      padding: 0;
-      width: 20px;
-      height: 20px;
-      line-height: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 10;
-    }
-    
-    .trenchbot-close-button:hover {
-      color: white;
-    }
-    
-    .trenchbot-refresh-button {
-      background: none;
-      border: none;
-      color: inherit;
-      cursor: pointer;
-      padding: 0;
-      margin-left: 4px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    
-    .trenchbot-refresh-button:hover {
-      opacity: 0.8;
-    }
-    
-    .trenchbot-refreshing {
-      animation: trenchbot-spin 1s linear infinite;
-    }
-    
-    .trenchbot-more-info-button {
-      background: none;
-      border: none;
-      padding: 0;
-      cursor: pointer;
-      color: #2196F3;
-      font-size: 12px;
-      text-decoration: underline;
-    }
-    
-    .trenchbot-more-info-button:hover {
-      color: #64b5f6;
-    }
-    
-    @keyframes trenchbot-spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-  `;
-  
-  document.head.appendChild(styles);
-}
-
-// Add styles for the bubble map
-function addBubbleMapStyles() {
-  if (document.getElementById('trenchbot-bubble-map-styles')) return;
-  
-  const styles = document.createElement('style');
-  styles.id = 'trenchbot-bubble-map-styles';
-  styles.textContent = `
-    .trenchbot-bubble-map {
-      position: fixed;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      width: 800px;
-      height: 600px;
-      max-width: 90vw;
-      max-height: 80vh;
-      background-color: #121212;
-      border-radius: 8px;
-      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
-      z-index: 10000;
-      display: flex;
-      flex-direction: column;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      overflow: hidden;
-      animation: trenchbot-fade-in 0.3s ease-out;
-    }
-    
-    .trenchbot-bubble-map-header {
-      padding: 15px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      background-color: #1a1a1a;
-    }
-    
-    .trenchbot-bubble-map-title {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-    }
-    
-    .trenchbot-bubble-map-ticker {
-      display: flex;
-      align-items: center;
-      font-size: 16px;
-      font-weight: 600;
-    }
-    
-    .trenchbot-bubble-map-stats {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 15px;
-      margin-bottom: 12px;
-    }
-    
-    .trenchbot-stat-item {
-      display: flex;
-      flex-direction: column;
-      font-size: 12px;
-    }
-    
-    .trenchbot-stat-label {
-      color: rgba(255, 255, 255, 0.7);
-    }
-    
-    .trenchbot-stat-value {
-      font-weight: 600;
-      font-size: 14px;
-    }
-    
-    .trenchbot-bubble-map-filters {
-      display: flex;
-      gap: 20px;
-      align-items: center;
-    }
-    
-    .trenchbot-filter-group {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    
-    .trenchbot-filter-group-label {
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.7);
-    }
-    
-    .trenchbot-filter-option {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    
-    .trenchbot-select {
-      background-color: #2a2a2a;
-      color: #fff;
-      border: 1px solid #444;
-      border-radius: 4px;
-      padding: 4px 8px;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    
-    .trenchbot-bubbles-container {
-      flex: 1;
-      position: relative;
-      overflow: hidden;
-      background-color: #0a0a0a;
-    }
-    
-    .trenchbot-bubble {
-      position: absolute;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      transition: transform 0.2s ease, box-shadow 0.2s ease;
-      animation: trenchbot-bubble-pop 0.5s ease-out;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-      opacity: 0.9;
-    }
-    
-    .trenchbot-bubble.trenchbot-holding {
-      background: rgba(255, 68, 68, 0.7);
-      border: 2px solid rgba(255, 68, 68, 0.9);
-    }
-    
-    .trenchbot-bubble.trenchbot-sold {
-      background: rgba(130, 130, 140, 0.4);
-      border: 2px solid rgba(130, 130, 140, 0.7);
-    }
-    
-    .trenchbot-bubble:hover, .trenchbot-bubble-hover {
-      transform: scale(1.05);
-      z-index: 2;
-      opacity: 1;
-    }
-    
-    .trenchbot-bubble-content {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 4px;
-      color: white;
-      text-align: center;
-      pointer-events: none; /* Allow clicks to pass through to the bubble itself */
-    }
-    
-    .trenchbot-bubble-icon {
-      font-size: 18px;
-      margin-bottom: 3px;
-    }
-    
-    .trenchbot-bubble-percentage {
-      font-size: 12px;
-      font-weight: 600;
-    }
-    
-    .trenchbot-bubble-tooltip {
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0, 0, 0, 0.9);
-      color: white;
-      padding: 8px;
-      border-radius: 4px;
-      font-size: 12px;
-      pointer-events: none;
-      white-space: nowrap;
-      display: none;
-      z-index: 3;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      min-width: 180px;
-    }
-    
-    .trenchbot-tooltip-content {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    
-    .trenchbot-tooltip-header {
-      font-weight: 600;
-      margin-bottom: 4px;
-      text-align: center;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-      padding-bottom: 4px;
-    }
-    
-    .trenchbot-tooltip-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
-    }
-    
-    .trenchbot-tooltip-label {
-      color: rgba(255, 255, 255, 0.7);
-    }
-    
-    .trenchbot-tooltip-value {
-      font-weight: 600;
-    }
-    
-    .trenchbot-no-data-message {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      color: rgba(255, 255, 255, 0.5);
-      font-size: 16px;
-      text-align: center;
-    }
-    
-    .trenchbot-bubble-map-legend {
-      display: flex;
-      gap: 15px;
-      padding: 10px 15px;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
-      background-color: #1a1a1a;
-      flex-wrap: wrap;
-      justify-content: center;
-    }
-    
-    .trenchbot-legend-item {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 12px;
-    }
-    
-    .trenchbot-legend-color {
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-    }
-    
-    .trenchbot-legend-holding {
-      background: rgba(255, 68, 68, 0.7);
-      border: 1px solid rgba(255, 68, 68, 0.9);
-    }
-    
-    .trenchbot-legend-sold {
-      background: rgba(130, 130, 140, 0.4);
-      border: 1px solid rgba(130, 130, 140, 0.7);
-    }
-    
-    .trenchbot-legend-icon {
-      font-size: 14px;
-    }
-    
-    .trenchbot-bundle-details-panel {
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      width: 100%;
-      max-height: 60%;
-      background-color: #1a1a1a;
-      border-top: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 0 0 8px 8px;
-      overflow: hidden;
-      animation: trenchbot-slide-up 0.3s ease-out;
-      z-index: 2;
-    }
-    
-    .trenchbot-details-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 10px 15px;
-      background-color: #222;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      position: relative;
-    }
-    
-    .trenchbot-details-header h3 {
-      margin: 0;
-      font-size: 14px;
-      font-weight: 600;
-    }
-    
-    .trenchbot-details-content {
-      padding: 15px;
-      overflow-y: auto;
-      max-height: calc(100% - 40px);
-    }
-    
-    .trenchbot-details-section {
-      margin-bottom: 16px;
-    }
-    
-    .trenchbot-details-section h4 {
-      margin: 0 0 8px 0;
-      font-size: 13px;
-      color: rgba(255, 255, 255, 0.9);
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      padding-bottom: 5px;
-    }
-    
-    .trenchbot-detail-row {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 6px;
-      font-size: 12px;
-    }
-    
-    .trenchbot-category-list {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-    
-    .trenchbot-no-data {
-      color: rgba(255, 255, 255, 0.5);
-      font-style: italic;
-      font-size: 12px;
-    }
-    
-    .trenchbot-wallets-list {
-      max-height: 200px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-    
-    .trenchbot-wallet-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 6px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-      font-size: 12px;
-    }
-    
-    .trenchbot-wallet-address {
-      font-family: monospace;
-      color: rgba(255, 255, 255, 0.8);
-    }
-    
-    .trenchbot-wallet-stats {
-      display: flex;
-      gap: 10px;
-    }
-    
-    @keyframes trenchbot-fade-in {
-      from { opacity: 0; }
-      to { opacity: 1; }
-    }
-    
-    @keyframes trenchbot-bubble-pop {
-      0% { transform: scale(0); opacity: 0; }
-      70% { transform: scale(1.1); }
-      100% { transform: scale(1); opacity: 0.9; }
-    }
-    
-    @keyframes trenchbot-slide-up {
-      from { transform: translateY(100%); }
-      to { transform: translateY(0); }
-    }
-  `;
-  
-  document.head.appendChild(styles);
-}
-
-// Initialize the extension
-init();
+})();
