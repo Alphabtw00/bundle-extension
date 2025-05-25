@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Axiom TrenchBot Bundle Info",
-  "version": "1.1",
+  "name": "Axiom Bundle Info",
+  "version": "1.2",
   "description": "Displays TrenchBot bundle information and visualizations on Axiom Trading Platform",
-  "permissions": ["scripting", "storage", "tabs"],
+  "permissions": ["storage", "webRequest"],
   "host_permissions": [
     "https://axiom.trade/*",
+    "https://*.axiom.trade/*",
+    "https://trench.bot/*",
     "https://api.dexscreener.com/*",
-    "https://trench.bot/*"
+    "https://solana-gateway.moralis.io/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -15,8 +17,14 @@
   "content_scripts": [
     {
       "matches": ["https://axiom.trade/*"],
-      "js": ["content.js"],
-      "run_at": "document_end"
+      "js": ["d3.v7.min.js", "content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["images/*"],
+      "matches": ["https://axiom.trade/*"]
     }
   ],
   "action": {
