@@ -49,17 +49,21 @@ function toggleExtensionState() {
   // Update UI
   updateUiForEnabledState(newState);
   
-  // Send message to background script
-  chrome.runtime.sendMessage({ 
-    action: 'setExtensionEnabled', 
-    enabled: newState 
+  // Send message to active tabs
+  chrome.tabs.query({ url: '*://axiom.trade/*' }, (tabs) => {
+    tabs.forEach(tab => {
+      chrome.tabs.sendMessage(tab.id, { 
+        action: 'toggleExtension', 
+        enabled: newState 
+      });
+    });
   });
   
   // Update status text
   if (newState) {
-    statusText.textContent = 'Extension is now enabled';
+    statusText.textContent = 'Extension is enabled';
   } else {
-    statusText.textContent = 'Extension is now disabled';
+    statusText.textContent = 'Extension is disabled';
     statusIndicator.className = 'status-indicator inactive';
   }
   
@@ -88,11 +92,23 @@ function refreshData() {
           showError('Could not connect to page');
         } else if (response && response.success) {
           statusText.textContent = 'Data refreshed successfully';
+          statusIndicator.className = 'status-indicator active';
           setTimeout(() => {
             checkExtensionStatus();
           }, 2000);
+        } else if (response && !response.success && response.cooldownRemaining) {
+          // Show cooldown message
+          statusText.textContent = `Refresh on cooldown (${response.cooldownRemaining}s)`;
+          refreshButton.disabled = true;
+          statusIndicator.className = 'status-indicator waiting';
+          
+          // Re-enable after cooldown
+          setTimeout(() => {
+            refreshButton.disabled = false;
+            checkExtensionStatus();
+          }, response.cooldownRemaining * 1000);
         } else {
-          showError('Failed to refresh data');
+          showError(response?.error || 'Failed to refresh data');
         }
       });
     } else {
@@ -106,7 +122,6 @@ function refreshData() {
 // Check the extension status on the current page
 function checkExtensionStatus() {
   statusText.textContent = 'Checking status...';
-  statusIndicator.className = 'status-indicator pending';
   
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs.length === 0) {
@@ -118,7 +133,7 @@ function checkExtensionStatus() {
     
     // Only try to get status if we're on axiom.trade
     if (currentTab.url && currentTab.url.includes('axiom.trade')) {
-      chrome.runtime.sendMessage({ action: 'getStatus' }, (response) => {
+      chrome.tabs.sendMessage(currentTab.id, { action: 'getStatus' }, (response) => {
         if (chrome.runtime.lastError || !response) {
           showError('Could not connect to page');
           return;
@@ -130,23 +145,34 @@ function checkExtensionStatus() {
           updateUiForEnabledState(response.enabled);
         }
         
-        if (response.error) {
-          showError(response.error);
-          return;
+        // Update refresh button based on cooldown
+        if (response.hasOwnProperty('canRefresh')) {
+          refreshButton.disabled = !response.canRefresh;
+          if (!response.canRefresh) {
+            refreshButton.title = `Wait ${response.cooldownRemaining}s`;
+          } else {
+            refreshButton.title = 'Refresh data';
+          }
         }
         
         // Update status based on response
         if (response.onTokenPage) {
           statusIndicator.className = 'status-indicator active';
-          statusText.textContent = 'Extension is active on this token page';
+          let statusMsg = 'Active on current token page';
           
           if (response.currentTokenAddress) {
             const shortAddress = formatAddress(response.currentTokenAddress);
-            statusText.textContent += ` (${shortAddress})`;
+            statusMsg += ` (${shortAddress})`;
           }
+          
+          if (!response.canRefresh) {
+            statusMsg += ` - Refresh in ${response.cooldownRemaining}s`;
+          }
+          
+          statusText.textContent = statusMsg;
         } else {
           statusIndicator.className = 'status-indicator waiting';
-          statusText.textContent = 'On Axiom, but not viewing a token';
+          statusText.textContent = 'On Axiom, but not viewing a token page';
         }
       });
     } else {
